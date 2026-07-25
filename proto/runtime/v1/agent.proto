@@ -31,11 +31,14 @@ message CreateSessionResponse {
 
 message EndSessionRequest {
   string session_id = 1;
+  string user_id = 2;  // ownership enforced when set
 }
 
 message EndSessionResponse {}
 
-message ListSessionsRequest {}
+message ListSessionsRequest {
+  string user_id = 1;  // when set, only this user's sessions are returned
+}
 
 message ListSessionsResponse {
   repeated Session sessions = 1;
@@ -44,6 +47,7 @@ message ListSessionsResponse {
 message ChatRequest {
   string session_id = 1;
   string content = 2;
+  string user_id = 3;  // ownership enforced when set
 }
 
 message Session {

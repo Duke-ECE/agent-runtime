@@ -23,6 +23,17 @@ export function grpcError(code: status, message: string): Error & { code: status
   return Object.assign(new Error(message), { code });
 }
 
+/**
+ * Enforce per-user session ownership: a non-empty request userId must match the
+ * session's owner. An empty userId keeps the old open behavior (local dev /
+ * open mode where the backend does not forward an identity).
+ */
+export function assertOwner<TAgent>(session: Session<TAgent>, userId: string | undefined): void {
+  if (userId && session.userId !== userId) {
+    throw grpcError(status.PERMISSION_DENIED, "session belongs to another user");
+  }
+}
+
 export class SessionManager<TAgent> {
   private readonly sessions = new Map<string, Session<TAgent>>();
   private reaper?: NodeJS.Timeout;

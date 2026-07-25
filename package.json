@@ -8,7 +8,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "sync-proto": "curl -fsSL https://raw.githubusercontent.com/Duke-ECE/protos/v0.3.0/proto/runtime/v1/agent.proto -o proto/runtime/v1/agent.proto",
+    "sync-proto": "curl -fsSL https://raw.githubusercontent.com/Duke-ECE/protos/v0.3.1/proto/runtime/v1/agent.proto -o proto/runtime/v1/agent.proto",
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test \"dist/test/*.test.js\"",
     "start": "node dist/src/server.js"

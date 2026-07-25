@@ -5,7 +5,7 @@ import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { loadConfig, type ServiceConfig } from "./config.js";
 import { createModel, createStreamFn, type SessionLlmConfig } from "./llm.js";
-import { SessionManager, grpcError } from "./session-manager.js";
+import { SessionManager, assertOwner, grpcError } from "./session-manager.js";
 import { buildTools, NullExecutor, type ToolExecutor } from "./tools.js";
 
 const SYSTEM_PROMPT =
@@ -118,8 +118,9 @@ export function createRuntime(config: ServiceConfig, executor: ToolExecutor = ne
     },
 
     endSession(call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) {
-      const { session_id } = call.request as { session_id?: string };
+      const { session_id, user_id } = call.request as { session_id?: string; user_id?: string };
       try {
+        assertOwner(sessions.get(session_id ?? ""), user_id);
         sessions.end(session_id ?? "");
         callback(null, {});
       } catch (err) {
@@ -128,8 +129,11 @@ export function createRuntime(config: ServiceConfig, executor: ToolExecutor = ne
     },
 
     listSessions(call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) {
+      const { user_id } = call.request as { user_id?: string };
+      // Empty user_id keeps the old open behavior (list everything, dev only).
+      const owned = user_id ? sessions.list().filter((s) => s.userId === user_id) : sessions.list();
       callback(null, {
-        sessions: sessions.list().map((s) => ({
+        sessions: owned.map((s) => ({
           id: s.id,
           user_id: s.userId,
           status: s.status,
@@ -140,10 +144,15 @@ export function createRuntime(config: ServiceConfig, executor: ToolExecutor = ne
     },
 
     chat(call: grpc.ServerWritableStream<any, any>) {
-      const { session_id, content } = call.request as { session_id?: string; content?: string };
+      const { session_id, content, user_id } = call.request as {
+        session_id?: string;
+        content?: string;
+        user_id?: string;
+      };
       let session;
       try {
         session = sessions.get(session_id ?? "");
+        assertOwner(session, user_id);
       } catch (err) {
         failStream(call, err as Error & { code: grpc.status });
         return;
