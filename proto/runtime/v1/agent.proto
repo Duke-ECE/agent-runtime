@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package runtime.v1;
+
+option go_package = "github.com/Duke-ECE/protos/gen/go/runtime/v1;v1";
+
+// AgentService hosts agent sessions. Service-to-service contract:
+// the web backend proxies browser traffic (HTTP/SSE) to this service.
+service AgentService {
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc Chat(ChatRequest) returns (stream ChatResponse);
+}
+
+message CreateSessionRequest {
+  string user_id = 1;
+  LlmConfig llm = 2;   // optional; server falls back to env config if absent
+}
+
+// LlmConfig points at any OpenAI-compatible endpoint.
+message LlmConfig {
+  string api_key = 1;
+  string base_url = 2;  // e.g. "https://api.openai.com/v1"
+  string model = 3;     // e.g. "gpt-4o-mini"
+}
+
+message CreateSessionResponse {
+  string session_id = 1;
+}
+
+message EndSessionRequest {
+  string session_id = 1;
+}
+
+message EndSessionResponse {}
+
+message ListSessionsRequest {}
+
+message ListSessionsResponse {
+  repeated Session sessions = 1;
+}
+
+message ChatRequest {
+  string session_id = 1;
+  string content = 2;
+}
+
+message Session {
+  string id = 1;
+  string user_id = 2;
+  string status = 3;
+  string created_at = 4;
+  string last_active = 5;
+}
+
+// ChatResponse is the unit of the Chat stream; the backend translates each
+// variant into a same-named SSE event.
+message ChatResponse {
+  oneof event {
+    TextDelta text_delta = 1;
+    ToolCall tool_call = 2;
+    ToolResult tool_result = 3;
+    Error error = 4;
+    Done done = 5;
+  }
+}
+
+message TextDelta {
+  string delta = 1;
+}
+
+message ToolCall {
+  string tool = 1;
+  string arguments_json = 2;
+}
+
+message ToolResult {
+  string tool = 1;
+  bool ok = 2;
+  string output = 3;
+  string error = 4;
+}
+
+message Error {
+  string message = 1;
+  bool retryable = 2;
+}
+
+message Done {
+  int64 input_tokens = 1;
+  int64 output_tokens = 2;
+}

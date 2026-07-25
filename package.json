@@ -1,0 +1,27 @@
+{
+  "name": "agent-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "gRPC agent session runtime for the Duke-ECE managed-agents platform, built on pi-ai/pi-agent-core",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "sync-proto": "curl -fsSL https://raw.githubusercontent.com/Duke-ECE/protos/v0.3.0/proto/runtime/v1/agent.proto -o proto/runtime/v1/agent.proto",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"dist/test/*.test.js\"",
+    "start": "node dist/src/server.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^0.82.0",
+    "@earendil-works/pi-ai": "^0.82.0",
+    "@grpc/grpc-js": "^1.13.4",
+    "@grpc/proto-loader": "^0.7.15",
+    "typebox": "^1.1.38"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.4",
+    "typescript": "^5.9.3"
+  }
+}

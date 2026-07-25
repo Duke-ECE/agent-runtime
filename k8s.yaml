@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-runtime
+  labels:
+    app: agent-runtime
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-runtime
+  template:
+    metadata:
+      labels:
+        app: agent-runtime
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: api
+          image: ghcr.io/duke-ece/agent-runtime:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50052
+          env:
+            - name: MAX_SESSIONS
+              value: "20"
+            - name: SESSION_TTL_MINUTES
+              value: "30"
+            - name: LLM_MODEL
+              value: "gpt-4o-mini"
+            - name: LLM_BASE_URL
+              value: "https://api.openai.com/v1"
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agent-runtime-llm
+                  key: api_key
+                  optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-runtime
+  labels:
+    app: agent-runtime
+spec:
+  type: ClusterIP
+  selector:
+    app: agent-runtime
+  ports:
+    - port: 50052
+      targetPort: 50052
