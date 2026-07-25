@@ -30,6 +30,10 @@ export function createModel(config: SessionLlmConfig): Model<"openai-completions
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128000,
     maxTokens: 16384,
+    // Google's OpenAI-compatible endpoint (and possibly others) rejects the
+    // `store` parameter with a bare 400. pi-ai auto-detection doesn't know
+    // these providers, so disable `store` explicitly.
+    compat: { supportsStore: false },
   };
 }
 
