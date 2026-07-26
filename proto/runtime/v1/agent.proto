@@ -16,6 +16,8 @@ service AgentService {
 message CreateSessionRequest {
   string user_id = 1;
   LlmConfig llm = 2;   // optional; server falls back to env config if absent
+  string session_id = 3;  // optional; when set (by the session-manager), the
+                          // server adopts it instead of generating one
 }
 
 // LlmConfig points at any OpenAI-compatible endpoint.

@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package session.v1;
+
+option go_package = "github.com/Duke-ECE/protos/gen/go/session/v1;v1";
+
+// SessionService owns durable session records and transcripts. It is the
+// platform's privilege enforcement point for session data: user-scoped RPCs
+// require the caller's user_id and enforce ownership; runtime-internal RPCs
+// (AppendTurn, and GetTranscript for a non-owner) require a service token.
+// Storage is Postgres (agent_sessions / agent_messages); the agent-runtime
+// keeps live agents in memory and writes each completed turn through here.
+service SessionService {
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
+  rpc AppendTurn(AppendTurnRequest) returns (AppendTurnResponse);
+  rpc GetTranscript(GetTranscriptRequest) returns (GetTranscriptResponse);
+}
+
+message CreateSessionRequest {
+  string user_id = 1;  // required; becomes the session owner
+  string llm_model = 2;  // informational, for display in the console
+}
+
+message CreateSessionResponse {
+  Session session = 1;
+}
+
+message GetSessionRequest {
+  string session_id = 1;
+  string user_id = 2;  // ownership enforced
+}
+
+message GetSessionResponse {
+  Session session = 1;
+}
+
+message ListSessionsRequest {
+  string user_id = 1;  // required; only this user's sessions are returned
+}
+
+message ListSessionsResponse {
+  repeated Session sessions = 1;
+}
+
+message EndSessionRequest {
+  string session_id = 1;
+  string user_id = 2;  // ownership enforced
+}
+
+message EndSessionResponse {}
+
+// AppendTurn is the runtime's write-through after a completed Chat turn.
+// Trusted callers only (service token), so no ownership check against
+// user_id; user_id is carried for auditing.
+message AppendTurnRequest {
+  string session_id = 1;
+  string user_id = 2;
+  repeated TurnMessage messages = 3;  // seq fields are assigned by the server
+}
+
+message AppendTurnResponse {}
+
+// GetTranscript returns the full ordered transcript. Allowed for the session
+// owner (user_id matches) or for a service-token caller (runtime hydration).
+message GetTranscriptRequest {
+  string session_id = 1;
+  string user_id = 2;
+}
+
+message GetTranscriptResponse {
+  repeated TurnMessage messages = 1;  // ordered by seq
+}
+
+message Session {
+  string id = 1;
+  string user_id = 2;
+  string status = 3;  // "active" | "ended"
+  string llm_model = 4;
+  string created_at = 5;  // RFC 3339
+  string last_active = 6;  // RFC 3339
+  string ended_at = 7;  // RFC 3339, empty unless ended
+}
+
+message TurnMessage {
+  int32 seq = 1;
+  string role = 2;  // "user" | "assistant" | "tool_call" | "tool_result"
+  string content_json = 3;  // role-specific payload, JSON-encoded
+  string created_at = 4;  // RFC 3339
+}

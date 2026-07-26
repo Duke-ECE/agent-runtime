@@ -9,6 +9,10 @@ export interface ServiceConfig {
   maxSessions: number;
   sessionTtlMinutes: number;
   llm: LlmEnvConfig;
+  /** session-manager gRPC address; when unset, turn write-through is disabled. */
+  sessionManagerAddr?: string;
+  /** Shared service token sent as x-service-token metadata to session-manager. */
+  serviceToken?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig {
@@ -21,5 +25,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
       baseUrl: env.LLM_BASE_URL || "https://api.openai.com/v1",
       model: env.LLM_MODEL || "gpt-4o-mini",
     },
+    sessionManagerAddr: env.SESSION_MANAGER_ADDR || undefined,
+    serviceToken: env.SERVICE_TOKEN || undefined,
   };
 }

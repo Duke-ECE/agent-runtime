@@ -40,6 +40,24 @@ test("cap exceeded -> RESOURCE_EXHAUSTED", () => {
   assert.equal(manager.size, 1);
 });
 
+test("create adopts a caller-provided id", () => {
+  const { manager, createAgent } = makeManager();
+  const s = manager.create("alice", createAgent, "sess-from-manager");
+  assert.equal(s.id, "sess-from-manager");
+  assert.equal(manager.get("sess-from-manager").userId, "alice");
+});
+
+test("create with a colliding caller-provided id -> ALREADY_EXISTS", () => {
+  const { manager, createAgent } = makeManager();
+  manager.create("alice", createAgent, "sess-dup");
+  assert.throws(() => manager.create("bob", createAgent, "sess-dup"), (err: unknown) => {
+    assert.equal((err as { code: number }).code, status.ALREADY_EXISTS);
+    return true;
+  });
+  assert.equal(manager.size, 1);
+  assert.equal(manager.get("sess-dup").userId, "alice");
+});
+
 test("get/end unknown session -> NOT_FOUND", () => {
   const { manager } = makeManager();
   for (const op of [() => manager.get("sess-nope"), () => manager.end("sess-nope")]) {

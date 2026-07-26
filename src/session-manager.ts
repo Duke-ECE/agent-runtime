@@ -57,11 +57,16 @@ export class SessionManager<TAgent> {
     return this.sessions.size;
   }
 
-  create(userId: string, createAgent: (sessionId: string, userId: string) => TAgent): Session<TAgent> {
+  create(userId: string, createAgent: (sessionId: string, userId: string) => TAgent, id?: string): Session<TAgent> {
     if (this.sessions.size >= this.options.maxSessions) {
       throw grpcError(status.RESOURCE_EXHAUSTED, `session limit reached (${this.options.maxSessions})`);
     }
-    const id = `sess-${randomBytes(8).toString("hex")}`;
+    // A caller-provided id (from the session-manager service) is adopted as-is
+    // and must not collide with a live session.
+    if (id && this.sessions.has(id)) {
+      throw grpcError(status.ALREADY_EXISTS, `session already exists: ${id}`);
+    }
+    id = id || `sess-${randomBytes(8).toString("hex")}`;
     const now = new Date();
     const session: Session<TAgent> = {
       id,

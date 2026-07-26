@@ -176,3 +176,22 @@ test("per-user session ownership is enforced across RPCs", async (t) => {
     });
   });
 });
+
+test("CreateSession adopts a caller-provided session_id; duplicates -> ALREADY_EXISTS", async (t) => {
+  const { client, close } = await setup();
+  t.after(close);
+
+  const created = await client.createSession({ user_id: "alice", session_id: "sess-external" });
+  assert.equal(created.session_id, "sess-external");
+
+  await assert.rejects(client.createSession({ user_id: "bob", session_id: "sess-external" }), (err: unknown) => {
+    assert.equal((err as grpc.ServiceError).code, grpc.status.ALREADY_EXISTS);
+    return true;
+  });
+
+  const all = await client.listSessions({});
+  assert.deepEqual(
+    all.sessions.map((s) => s.id),
+    ["sess-external"],
+  );
+});

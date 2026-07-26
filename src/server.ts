@@ -5,6 +5,7 @@ import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { loadConfig, type ServiceConfig } from "./config.js";
 import { createModel, createStreamFn, type SessionLlmConfig } from "./llm.js";
+import { createSessionWriter, type TurnMessageInput } from "./session-client.js";
 import { SessionManager, assertOwner, grpcError } from "./session-manager.js";
 import { buildTools, NullExecutor, type ToolExecutor } from "./tools.js";
 
@@ -67,6 +68,7 @@ export function createRuntime(config: ServiceConfig, executor: ToolExecutor = ne
     ttlMs: config.sessionTtlMinutes * 60_000,
     destroyAgent: ({ agent }) => agent.abort(),
   });
+  const sessionWriter = createSessionWriter(config);
 
   function resolveLlm(req: { api_key?: string; base_url?: string; model?: string } | undefined): SessionLlmConfig {
     return {
@@ -89,8 +91,9 @@ export function createRuntime(config: ServiceConfig, executor: ToolExecutor = ne
 
   const service: grpc.UntypedServiceImplementation = {
     createSession(call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) {
-      const { user_id, llm } = call.request as {
+      const { user_id, session_id, llm } = call.request as {
         user_id?: string;
+        session_id?: string;
         llm?: { api_key?: string; base_url?: string; model?: string };
       };
       if (!user_id) {
@@ -99,18 +102,22 @@ export function createRuntime(config: ServiceConfig, executor: ToolExecutor = ne
       }
       try {
         const resolved = resolveLlm(llm);
-        const session = sessions.create(user_id, (sessionId) => ({
-          llm: resolved,
-          agent: new Agent({
-            initialState: {
-              systemPrompt: SYSTEM_PROMPT,
-              model: createModel(resolved),
-              tools: buildTools(executor),
-            },
-            streamFn: createStreamFn(resolved),
-            sessionId,
+        const session = sessions.create(
+          user_id,
+          (sessionId) => ({
+            llm: resolved,
+            agent: new Agent({
+              initialState: {
+                systemPrompt: SYSTEM_PROMPT,
+                model: createModel(resolved),
+                tools: buildTools(executor),
+              },
+              streamFn: createStreamFn(resolved),
+              sessionId,
+            }),
           }),
-        }));
+          session_id || undefined,
+        );
         callback(null, { session_id: session.id });
       } catch (err) {
         callback(err as grpc.ServiceError, null);
@@ -180,27 +187,35 @@ export function createRuntime(config: ServiceConfig, executor: ToolExecutor = ne
       let inputTokens = 0;
       let outputTokens = 0;
       let turnFailed = false;
+      // Transcript collection for the session-manager write-through: assistant
+      // text is aggregated into one message; tool events are recorded as-is.
+      let assistantText = "";
+      const toolMessages: TurnMessageInput[] = [];
 
       const unsubscribe = agent.subscribe((event) => {
         switch (event.type) {
           case "message_update":
             if (event.assistantMessageEvent.type === "text_delta") {
+              assistantText += event.assistantMessageEvent.delta;
               call.write({ text_delta: { delta: event.assistantMessageEvent.delta } });
             }
             break;
-          case "tool_execution_start":
-            call.write({ tool_call: { tool: event.toolName, arguments_json: JSON.stringify(event.args ?? {}) } });
+          case "tool_execution_start": {
+            const payload = { tool: event.toolName, arguments_json: JSON.stringify(event.args ?? {}) };
+            toolMessages.push({ role: "tool_call", contentJson: JSON.stringify(payload), createdAt: new Date() });
+            call.write({ tool_call: payload });
             break;
+          }
           case "tool_execution_end": {
             const text = toolResultText(event.result);
-            call.write({
-              tool_result: {
-                tool: event.toolName,
-                ok: !event.isError,
-                output: event.isError ? "" : text,
-                error: event.isError ? text : "",
-              },
-            });
+            const payload = {
+              tool: event.toolName,
+              ok: !event.isError,
+              output: event.isError ? "" : text,
+              error: event.isError ? text : "",
+            };
+            toolMessages.push({ role: "tool_result", contentJson: JSON.stringify(payload), createdAt: new Date() });
+            call.write({ tool_result: payload });
             break;
           }
           case "message_end": {
@@ -226,8 +241,18 @@ export function createRuntime(config: ServiceConfig, executor: ToolExecutor = ne
       agent
         .prompt(content ?? "")
         .then(() => {
-          if (!turnFailed) {
+          // Skip the write-through on error/abort turns and on client disconnect.
+          if (!turnFailed && !call.cancelled) {
             call.write({ done: { input_tokens: inputTokens, output_tokens: outputTokens } });
+            const now = new Date();
+            const turn: TurnMessageInput[] = [
+              { role: "user", contentJson: JSON.stringify({ content: content ?? "" }), createdAt: now },
+            ];
+            if (assistantText) {
+              turn.push({ role: "assistant", contentJson: JSON.stringify({ content: assistantText }), createdAt: now });
+            }
+            turn.push(...toolMessages);
+            sessionWriter?.appendTurn(session.id, session.userId, turn);
           }
           call.end();
         })

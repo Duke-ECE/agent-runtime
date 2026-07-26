@@ -37,6 +37,14 @@ spec:
                   name: agent-runtime-llm
                   key: api_key
                   optional: true
+            - name: SESSION_MANAGER_ADDR
+              value: "session-manager:50053"
+            - name: SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: session-service-token
+                  key: token
+                  optional: true
 ---
 apiVersion: v1
 kind: Service
