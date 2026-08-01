@@ -1,11 +1,12 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { Agent } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { loadConfig, type ServiceConfig } from "./config.js";
+import { transcriptToMessages } from "./hydrate.js";
 import { createModel, createStreamFn, type SessionLlmConfig } from "./llm.js";
-import { createSessionWriter, type TurnMessageInput } from "./session-client.js";
+import { createSessionClient, type TurnMessageInput } from "./session-client.js";
 import { SessionManager, assertOwner, grpcError } from "./session-manager.js";
 import { buildTools, NullExecutor, type ToolExecutor } from "./tools.js";
 
@@ -68,7 +69,7 @@ export function createRuntime(config: ServiceConfig, executor: ToolExecutor = ne
     ttlMs: config.sessionTtlMinutes * 60_000,
     destroyAgent: ({ agent }) => agent.abort(),
   });
-  const sessionWriter = createSessionWriter(config);
+  const sessionClient = createSessionClient(config);
 
   function resolveLlm(req: { api_key?: string; base_url?: string; model?: string } | undefined): SessionLlmConfig {
     return {
@@ -90,7 +91,7 @@ export function createRuntime(config: ServiceConfig, executor: ToolExecutor = ne
   };
 
   const service: grpc.UntypedServiceImplementation = {
-    createSession(call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) {
+    async createSession(call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) {
       const { user_id, session_id, llm } = call.request as {
         user_id?: string;
         session_id?: string;
@@ -102,6 +103,26 @@ export function createRuntime(config: ServiceConfig, executor: ToolExecutor = ne
       }
       try {
         const resolved = resolveLlm(llm);
+        const model = createModel(resolved);
+        // Hydration: a caller-provided session id may have a durable transcript
+        // in session-manager (e.g. after a runtime restart). Fetch it before
+        // the agent is constructed so it can seed initialState.messages.
+        // Fail-open: any problem leaves the session with empty history.
+        let history: AgentMessage[] | undefined;
+        if (session_id && sessionClient) {
+          try {
+            const turns = await sessionClient.getTranscript(session_id);
+            if (turns && turns.length > 0) {
+              const messages = transcriptToMessages(turns, { api: model.api, provider: model.provider, model: model.id });
+              if (messages.length > 0) {
+                history = messages;
+                console.log(`hydrated session ${session_id} with ${messages.length} messages from transcript`);
+              }
+            }
+          } catch (err) {
+            console.warn(`hydration failed for ${session_id}, starting with empty history:`, err);
+          }
+        }
         const session = sessions.create(
           user_id,
           (sessionId) => ({
@@ -109,8 +130,9 @@ export function createRuntime(config: ServiceConfig, executor: ToolExecutor = ne
             agent: new Agent({
               initialState: {
                 systemPrompt: SYSTEM_PROMPT,
-                model: createModel(resolved),
+                model,
                 tools: buildTools(executor),
+                ...(history ? { messages: history } : {}),
               },
               streamFn: createStreamFn(resolved),
               sessionId,
@@ -252,7 +274,7 @@ export function createRuntime(config: ServiceConfig, executor: ToolExecutor = ne
               turn.push({ role: "assistant", contentJson: JSON.stringify({ content: assistantText }), createdAt: now });
             }
             turn.push(...toolMessages);
-            sessionWriter?.appendTurn(session.id, session.userId, turn);
+            sessionClient?.appendTurn(session.id, session.userId, turn);
           }
           call.end();
         })

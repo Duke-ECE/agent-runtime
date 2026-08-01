@@ -28,6 +28,14 @@ In-memory session map. `CreateSession` issues `sess-<random>` ids and enforces
 session; unknown sessions yield `NOT_FOUND`. A reaper runs every minute and
 removes sessions idle longer than `SESSION_TTL_MINUTES`.
 
+When `SESSION_MANAGER_ADDR` is set, each completed Chat turn is written through
+to session-manager via `session.v1.AppendTurn` (fire-and-log). If `CreateSession`
+then arrives with a caller-provided `session_id` that is not live in memory
+(e.g. after a runtime restart), the runtime fetches the durable transcript via
+`session.v1.GetTranscript` (token-only, `x-service-token` metadata) and seeds
+the new agent's history with it. Hydration is fail-open: any error starts the
+session with empty history.
+
 LLM config resolution per session: `CreateSession.llm` (api_key / base_url /
 model) wins; anything absent falls back to `LLM_API_KEY` / `LLM_BASE_URL` /
 `LLM_MODEL` env vars.

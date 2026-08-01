@@ -11,18 +11,38 @@ export interface TurnMessageInput {
   createdAt: Date;
 }
 
+/** One transcript message as returned by GetTranscript (ordered by seq). */
+export interface TranscriptTurn {
+  seq: number;
+  role: string;
+  contentJson: string;
+  createdAt?: string;
+}
+
+/** Bound on how long CreateSession may wait for a transcript fetch. */
+const GET_TRANSCRIPT_TIMEOUT_MS = 5_000;
+
 /**
- * Write-through to session-manager (session.v1.SessionService). AppendTurn is
+ * Client for session-manager (session.v1.SessionService). AppendTurn is
  * fire-and-log: a failure is warned about but never surfaced to the chat path.
+ * GetTranscript backs CreateSession hydration and is fail-open too: any error
+ * resolves to null so a session can always start with empty history.
  */
-export interface SessionWriter {
+export interface SessionClient {
   appendTurn(sessionId: string, userId: string, messages: TurnMessageInput[]): void;
+  getTranscript(sessionId: string): Promise<TranscriptTurn[] | null>;
 }
 
 interface SessionServiceClient {
   appendTurn(
     req: unknown,
     metadata: grpc.Metadata,
+    callback: (err: grpc.ServiceError | null, res: unknown) => void,
+  ): void;
+  getTranscript(
+    req: unknown,
+    metadata: grpc.Metadata,
+    options: grpc.CallOptions,
     callback: (err: grpc.ServiceError | null, res: unknown) => void,
   ): void;
   close(): void;
@@ -38,12 +58,12 @@ function resolveProtoPath(): string {
 }
 
 /** Returns undefined when SESSION_MANAGER_ADDR is not configured. */
-export function createSessionWriter(config: ServiceConfig): SessionWriter | undefined {
+export function createSessionClient(config: ServiceConfig): SessionClient | undefined {
   if (!config.sessionManagerAddr) return undefined;
   const addr = config.sessionManagerAddr;
   let client: SessionServiceClient | undefined;
 
-  // The gRPC client is created lazily on the first append so the runtime
+  // The gRPC client is created lazily on the first call so the runtime
   // starts (and tests run) without session-manager being reachable.
   function getClient(): SessionServiceClient {
     if (!client) {
@@ -86,6 +106,48 @@ export function createSessionWriter(config: ServiceConfig): SessionWriter | unde
       } catch (err) {
         console.warn(`session-manager AppendTurn failed for ${sessionId}:`, err);
       }
+    },
+
+    // Token-only GetTranscript (no user_id): the service token authorizes the
+    // runtime hydration path on session-manager. Fail-open on any error.
+    getTranscript(sessionId) {
+      return new Promise<TranscriptTurn[] | null>((resolve) => {
+        let serviceClient: SessionServiceClient;
+        try {
+          serviceClient = getClient();
+        } catch (err) {
+          console.warn(`session-manager GetTranscript failed for ${sessionId}:`, err);
+          resolve(null);
+          return;
+        }
+        const metadata = new grpc.Metadata();
+        if (config.serviceToken) metadata.set("x-service-token", config.serviceToken);
+        const options: grpc.CallOptions = { deadline: Date.now() + GET_TRANSCRIPT_TIMEOUT_MS };
+        try {
+          serviceClient.getTranscript({ session_id: sessionId }, metadata, options, (err, res) => {
+            if (err) {
+              console.warn(`session-manager GetTranscript failed for ${sessionId}: ${err.message}`);
+              resolve(null);
+              return;
+            }
+            const messages =
+              (res as {
+                messages?: Array<{ seq?: number; role?: string; content_json?: string; created_at?: string }>;
+              } | null)?.messages ?? [];
+            resolve(
+              messages.map((m) => ({
+                seq: Number(m.seq ?? 0),
+                role: String(m.role ?? ""),
+                contentJson: typeof m.content_json === "string" ? m.content_json : String(m.content_json ?? ""),
+                createdAt: m.created_at || undefined,
+              })),
+            );
+          });
+        } catch (err) {
+          console.warn(`session-manager GetTranscript failed for ${sessionId}:`, err);
+          resolve(null);
+        }
+      });
     },
   };
 }
