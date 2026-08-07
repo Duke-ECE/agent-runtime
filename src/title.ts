@@ -11,8 +11,11 @@ const TITLE_SYSTEM_PROMPT =
   "You write very short conversation titles. Title this conversation in at most 8 words, " +
   "no quotes, no punctuation at the end. Reply with the title only.";
 
-/** Titles are cosmetic; keep the completion tiny. */
-const TITLE_MAX_TOKENS = 32;
+/** Titles are cosmetic; keep the completion small. Not tiny on purpose:
+ *  reasoning models (e.g. OpenRouter's gpt-oss) burn a few hundred tokens
+ *  thinking before the first content token — a small budget starves them
+ *  into an empty finish_reason=length completion. */
+const TITLE_MAX_TOKENS = 1024;
 const TITLE_MAX_CHARS = 80;
 
 /**
@@ -42,8 +45,14 @@ export const generateTitle: TitleGenerator = async (llm, firstUserMessage) => {
   if (message.stopReason === "error" || message.stopReason === "aborted") {
     throw new Error(message.errorMessage ?? "title generation failed");
   }
-  return message.content
+  const text = message.content
     .filter((part): part is { type: "text"; text: string } => part.type === "text")
     .map((part) => part.text)
     .join("");
+  // Surface starved completions (e.g. reasoning models hitting the token
+  // budget before any content) instead of silently skipping the title.
+  if (!text.trim()) {
+    throw new Error(`title generation returned empty text (stopReason=${message.stopReason})`);
+  }
+  return text;
 };
