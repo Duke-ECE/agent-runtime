@@ -300,7 +300,17 @@ export function createRuntime(
             if (sessionClient && session.agent.titlePending) {
               session.agent.titlePending = false;
               const llm = session.agent.llm;
-              void titleGenerator(llm, content ?? "")
+              const generate = () => titleGenerator(llm, content ?? "");
+              // One delayed retry: the free-tier default model 429s often
+              // enough that a single attempt is noticeably lossy.
+              const retryOnce = () =>
+                new Promise<string>((resolve, reject) => {
+                  setTimeout(() => {
+                    generate().then(resolve, reject);
+                  }, 30_000);
+                });
+              void generate()
+                .catch(() => retryOnce())
                 .then((raw) => {
                   const title = sanitizeTitle(raw);
                   if (title) sessionClient.setTitle(session.id, title);
