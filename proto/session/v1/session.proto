@@ -23,6 +23,7 @@ service SessionService {
 message CreateSessionRequest {
   string user_id = 1;  // required; becomes the session owner
   string llm_model = 2;  // informational, for display in the console
+  string agent_id = 3;  // optional; the agent template this session runs
 }
 
 message CreateSessionResponse {
@@ -97,6 +98,7 @@ message Session {
   string last_active = 6;  // RFC 3339
   string ended_at = 7;  // RFC 3339, empty unless ended
   string title = 8;  // optional display title
+  string agent_id = 9;  // optional; the agent template this session runs
 }
 
 message TurnMessage {

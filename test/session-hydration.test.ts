@@ -201,3 +201,35 @@ test("CreateSession without a caller session_id does not fetch a transcript", as
   assert.equal(sessionManager.transcriptRequests.length, 0);
   assert.deepEqual(runtime.sessions.get(created.session_id).agent.agent.state.messages, []);
 });
+
+test("CreateSession on resume applies the passed system_prompt and tools to the hydrated agent", async (t) => {
+  const sessionManager = await startFakeSessionManager({
+    transcript: [
+      transcriptMessage(1, "user", { content: "hi" }),
+      transcriptMessage(2, "assistant", { content: "hello there" }),
+    ],
+  });
+  t.after(sessionManager.close);
+  const { runtime, createSession } = await setup(t, sessionManager.addr);
+
+  const created = await createSession({
+    user_id: "alice",
+    session_id: "sess-resumed",
+    system_prompt: "You are a terse reviewer.",
+    tools: ["read"],
+  });
+  assert.equal(created.session_id, "sess-resumed");
+  assert.equal(sessionManager.transcriptRequests.length, 1);
+
+  const state = runtime.sessions.get("sess-resumed").agent.agent.state;
+  assert.equal(state.systemPrompt, "You are a terse reviewer.");
+  assert.deepEqual(
+    state.tools.map((tool) => tool.name),
+    ["read"],
+  );
+  // History still hydrated alongside the new prompt/tools.
+  assert.deepEqual(
+    state.messages.map((m: { role: string }) => m.role),
+    ["user", "assistant"],
+  );
+});

@@ -11,7 +11,7 @@ import { SessionManager, assertOwner, grpcError } from "./session-manager.js";
 import { generateTitle, sanitizeTitle, type TitleGenerator } from "./title.js";
 import { buildTools, NullExecutor, type ToolExecutor } from "./tools.js";
 
-const SYSTEM_PROMPT =
+export const SYSTEM_PROMPT =
   "You are a helpful coding assistant for a Duke ECE student. " +
   "You have read/write/bash/edit tools, but they run in the student's sandbox. " +
   "If a tool call fails because the sandbox is not connected, explain that tools are temporarily unavailable and help the user in text instead.";
@@ -108,14 +108,32 @@ export function createRuntime(
 
   const service: grpc.UntypedServiceImplementation = {
     async createSession(call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) {
-      const { user_id, session_id, llm } = call.request as {
+      const { user_id, session_id, llm, system_prompt, tools: toolNames } = call.request as {
         user_id?: string;
         session_id?: string;
         llm?: { api_key?: string; base_url?: string; model?: string };
+        system_prompt?: string;
+        tools?: string[];
       };
       if (!user_id) {
         callback(grpcError(grpc.status.INVALID_ARGUMENT, "user_id is required") as grpc.ServiceError, null);
         return;
+      }
+      // Optional tool whitelist: empty/absent = all built-ins; unknown names
+      // are rejected before any session state (or hydration fetch) happens.
+      const allTools = buildTools(executor);
+      let sessionTools = allTools;
+      if (toolNames && toolNames.length > 0) {
+        const known = new Set(allTools.map((t) => t.name));
+        const unknown = toolNames.filter((name) => !known.has(name));
+        if (unknown.length > 0) {
+          callback(
+            grpcError(grpc.status.INVALID_ARGUMENT, `unknown tools: ${unknown.join(", ")}`) as grpc.ServiceError,
+            null,
+          );
+          return;
+        }
+        sessionTools = allTools.filter((t) => toolNames.includes(t.name));
       }
       try {
         const resolved = resolveLlm(llm);
@@ -148,9 +166,12 @@ export function createRuntime(
             titlePending: !history,
             agent: new Agent({
               initialState: {
-                systemPrompt: SYSTEM_PROMPT,
+                // A caller-provided system prompt overrides the built-in
+                // default. This is the same code path for fresh and hydrated
+                // (resumed) sessions, so a resume re-applies the prompt.
+                systemPrompt: system_prompt || SYSTEM_PROMPT,
                 model,
-                tools: buildTools(executor),
+                tools: sessionTools,
                 ...(history ? { messages: history } : {}),
               },
               streamFn: createStreamFn(resolved),

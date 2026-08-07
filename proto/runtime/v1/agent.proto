@@ -18,6 +18,10 @@ message CreateSessionRequest {
   LlmConfig llm = 2;   // optional; server falls back to env config if absent
   string session_id = 3;  // optional; when set (by the session-manager), the
                           // server adopts it instead of generating one
+  string system_prompt = 4;  // optional; empty = server built-in default
+  repeated string tools = 5;  // optional; empty = all built-in tools
+                              // (read, write, bash, edit); unknown names are
+                              // rejected with INVALID_ARGUMENT
 }
 
 // LlmConfig points at any OpenAI-compatible endpoint.

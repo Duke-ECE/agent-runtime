@@ -9,7 +9,7 @@ OpenAI-compatible LLM endpoint.
 
 Implements `runtime.v1.AgentService` from the
 [Duke-ECE/protos](https://github.com/Duke-ECE/protos) repo
-(`proto/runtime/v1/agent.proto`, pinned to tag `v0.5.0`). The proto is loaded
+(`proto/runtime/v1/agent.proto`, pinned to tag `v0.6.0`). The proto is loaded
 at runtime with `@grpc/grpc-js` + `@grpc/proto-loader` — no codegen.
 
 Methods: `CreateSession`, `EndSession`, `ListSessions`, `Chat` (server-streaming:
@@ -47,6 +47,11 @@ session-manager — only warn and never affect the chat path.
 LLM config resolution per session: `CreateSession.llm` (api_key / base_url /
 model) wins; anything absent falls back to `LLM_API_KEY` / `LLM_BASE_URL` /
 `LLM_MODEL` env vars.
+
+`CreateSession` also accepts an optional `system_prompt` (empty = the built-in
+default; applied to fresh and hydrated/resumed sessions alike) and an optional
+`tools` whitelist (empty = all built-ins; unknown names are rejected with
+`INVALID_ARGUMENT`).
 
 ## Tools
 
