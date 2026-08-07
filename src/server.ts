@@ -11,11 +11,6 @@ import { SessionManager, assertOwner, grpcError } from "./session-manager.js";
 import { generateTitle, sanitizeTitle, type TitleGenerator } from "./title.js";
 import { buildTools, NullExecutor, type ToolExecutor } from "./tools.js";
 
-export const SYSTEM_PROMPT =
-  "You are a helpful coding assistant for a Duke ECE student. " +
-  "You have read/write/bash/edit tools, but they run in the student's sandbox. " +
-  "If a tool call fails because the sandbox is not connected, explain that tools are temporarily unavailable and help the user in text instead.";
-
 interface RuntimeSession {
   agent: Agent;
   llm: SessionLlmConfig;
@@ -166,10 +161,13 @@ export function createRuntime(
             titlePending: !history,
             agent: new Agent({
               initialState: {
-                // A caller-provided system prompt overrides the built-in
-                // default. This is the same code path for fresh and hydrated
-                // (resumed) sessions, so a resume re-applies the prompt.
-                systemPrompt: system_prompt || SYSTEM_PROMPT,
+                // The runtime carries no built-in default system prompt: the
+                // platform's "Default assistant" template lives in the
+                // template store, and the backend sends the prompt explicitly
+                // when one is wanted. Empty/absent system_prompt = no system
+                // prompt (pi-ai omits the system message for a falsy value).
+                // Same code path for fresh and hydrated (resumed) sessions.
+                systemPrompt: system_prompt || "",
                 model,
                 tools: sessionTools,
                 ...(history ? { messages: history } : {}),

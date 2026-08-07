@@ -48,10 +48,12 @@ LLM config resolution per session: `CreateSession.llm` (api_key / base_url /
 model) wins; anything absent falls back to `LLM_API_KEY` / `LLM_BASE_URL` /
 `LLM_MODEL` env vars.
 
-`CreateSession` also accepts an optional `system_prompt` (empty = the built-in
-default; applied to fresh and hydrated/resumed sessions alike) and an optional
-`tools` whitelist (empty = all built-ins; unknown names are rejected with
-`INVALID_ARGUMENT`).
+`CreateSession` also accepts an optional `system_prompt` (empty = no system
+prompt — the runtime carries no built-in default; the platform's "Default
+assistant" template lives in the backend's template store, which sends the
+prompt explicitly when one is wanted; applied to fresh and hydrated/resumed
+sessions alike) and an optional `tools` whitelist (empty = all built-ins;
+unknown names are rejected with `INVALID_ARGUMENT`).
 
 ## Tools
 

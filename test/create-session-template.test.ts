@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
-import { createRuntime, SYSTEM_PROMPT, type Runtime } from "../src/server.js";
+import { createRuntime, type Runtime } from "../src/server.js";
 import type { ServiceConfig } from "../src/config.js";
 
 function resolveProtoPath(): string {
@@ -60,24 +60,24 @@ function agentState(runtime: Runtime, sessionId: string): { systemPrompt: string
   return runtime.sessions.get(sessionId).agent.agent.state;
 }
 
-test("CreateSession without the new fields keeps the built-in prompt and all tools", async (t) => {
+test("CreateSession without the new fields starts with no system prompt and all tools", async (t) => {
   const { runtime, createSession } = await setup(t);
 
   const created = await createSession({ user_id: "alice" });
   const state = agentState(runtime, created.session_id);
-  assert.equal(state.systemPrompt, SYSTEM_PROMPT);
+  assert.equal(state.systemPrompt, "");
   assert.deepEqual(
     state.tools.map((tool) => tool.name),
     ["read", "write", "bash", "edit"],
   );
 });
 
-test("CreateSession with empty system_prompt and tools keeps the defaults", async (t) => {
+test("CreateSession with empty system_prompt and tools starts with no system prompt and all tools", async (t) => {
   const { runtime, createSession } = await setup(t);
 
   const created = await createSession({ user_id: "alice", system_prompt: "", tools: [] });
   const state = agentState(runtime, created.session_id);
-  assert.equal(state.systemPrompt, SYSTEM_PROMPT);
+  assert.equal(state.systemPrompt, "");
   assert.deepEqual(
     state.tools.map((tool) => tool.name),
     ["read", "write", "bash", "edit"],
