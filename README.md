@@ -9,7 +9,7 @@ OpenAI-compatible LLM endpoint.
 
 Implements `runtime.v1.AgentService` from the
 [Duke-ECE/protos](https://github.com/Duke-ECE/protos) repo
-(`proto/runtime/v1/agent.proto`, pinned to tag `v0.3.0`). The proto is loaded
+(`proto/runtime/v1/agent.proto`, pinned to tag `v0.5.0`). The proto is loaded
 at runtime with `@grpc/grpc-js` + `@grpc/proto-loader` — no codegen.
 
 Methods: `CreateSession`, `EndSession`, `ListSessions`, `Chat` (server-streaming:
@@ -35,6 +35,14 @@ then arrives with a caller-provided `session_id` that is not live in memory
 `session.v1.GetTranscript` (token-only, `x-service-token` metadata) and seeds
 the new agent's history with it. Hydration is fail-open: any error starts the
 session with empty history.
+
+Auto session titles: after the **first completed Chat turn** of a session that
+began empty (not hydrated, no seeded history), the runtime makes one detached
+one-shot call to the session's own model ("title this conversation", seeded
+with the first user message), sanitizes the result (first line, trimmed,
+surrounding quotes stripped, capped at 80 chars), and reports it via
+`session.v1.SetTitle` (fire-and-log, `x-service-token`). Failures — LLM or
+session-manager — only warn and never affect the chat path.
 
 LLM config resolution per session: `CreateSession.llm` (api_key / base_url /
 model) wins; anything absent falls back to `LLM_API_KEY` / `LLM_BASE_URL` /

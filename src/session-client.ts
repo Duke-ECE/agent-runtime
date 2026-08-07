@@ -23,18 +23,25 @@ export interface TranscriptTurn {
 const GET_TRANSCRIPT_TIMEOUT_MS = 5_000;
 
 /**
- * Client for session-manager (session.v1.SessionService). AppendTurn is
- * fire-and-log: a failure is warned about but never surfaced to the chat path.
- * GetTranscript backs CreateSession hydration and is fail-open too: any error
- * resolves to null so a session can always start with empty history.
+ * Client for session-manager (session.v1.SessionService). AppendTurn and
+ * SetTitle are fire-and-log: a failure is warned about but never surfaced to
+ * the chat path. GetTranscript backs CreateSession hydration and is fail-open
+ * too: any error resolves to null so a session can always start with empty
+ * history.
  */
 export interface SessionClient {
   appendTurn(sessionId: string, userId: string, messages: TurnMessageInput[]): void;
+  setTitle(sessionId: string, title: string): void;
   getTranscript(sessionId: string): Promise<TranscriptTurn[] | null>;
 }
 
 interface SessionServiceClient {
   appendTurn(
+    req: unknown,
+    metadata: grpc.Metadata,
+    callback: (err: grpc.ServiceError | null, res: unknown) => void,
+  ): void;
+  setTitle(
     req: unknown,
     metadata: grpc.Metadata,
     callback: (err: grpc.ServiceError | null, res: unknown) => void,
@@ -105,6 +112,19 @@ export function createSessionClient(config: ServiceConfig): SessionClient | unde
         });
       } catch (err) {
         console.warn(`session-manager AppendTurn failed for ${sessionId}:`, err);
+      }
+    },
+
+    // Fire-and-log like AppendTurn: a title is cosmetic, so failures only warn.
+    setTitle(sessionId, title) {
+      const metadata = new grpc.Metadata();
+      if (config.serviceToken) metadata.set("x-service-token", config.serviceToken);
+      try {
+        getClient().setTitle({ session_id: sessionId, title }, metadata, (err) => {
+          if (err) console.warn(`session-manager SetTitle failed for ${sessionId}: ${err.message}`);
+        });
+      } catch (err) {
+        console.warn(`session-manager SetTitle failed for ${sessionId}:`, err);
       }
     },
 

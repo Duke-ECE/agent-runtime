@@ -8,6 +8,7 @@ import { transcriptToMessages } from "./hydrate.js";
 import { createModel, createStreamFn, type SessionLlmConfig } from "./llm.js";
 import { createSessionClient, type TurnMessageInput } from "./session-client.js";
 import { SessionManager, assertOwner, grpcError } from "./session-manager.js";
+import { generateTitle, sanitizeTitle, type TitleGenerator } from "./title.js";
 import { buildTools, NullExecutor, type ToolExecutor } from "./tools.js";
 
 const SYSTEM_PROMPT =
@@ -18,6 +19,8 @@ const SYSTEM_PROMPT =
 interface RuntimeSession {
   agent: Agent;
   llm: SessionLlmConfig;
+  /** True until the first completed Chat turn has been offered a generated title. */
+  titlePending: boolean;
 }
 
 function resolveProtoPath(): string {
@@ -63,7 +66,20 @@ export interface Runtime {
   sessions: SessionManager<RuntimeSession>;
 }
 
-export function createRuntime(config: ServiceConfig, executor: ToolExecutor = new NullExecutor()): Runtime {
+export interface RuntimeOptions {
+  /**
+   * One-shot title generator for auto session titles. Injectable seam for
+   * tests; defaults to a direct model call seeded with the first user message.
+   */
+  titleGenerator?: TitleGenerator;
+}
+
+export function createRuntime(
+  config: ServiceConfig,
+  executor: ToolExecutor = new NullExecutor(),
+  options: RuntimeOptions = {},
+): Runtime {
+  const titleGenerator = options.titleGenerator ?? generateTitle;
   const sessions = new SessionManager<RuntimeSession>({
     maxSessions: config.maxSessions,
     ttlMs: config.sessionTtlMinutes * 60_000,
@@ -127,6 +143,9 @@ export function createRuntime(config: ServiceConfig, executor: ToolExecutor = ne
           user_id,
           (sessionId) => ({
             llm: resolved,
+            // Only a session that began empty gets an auto title after its
+            // first completed turn; hydrated/history-seeded sessions don't.
+            titlePending: !history,
             agent: new Agent({
               initialState: {
                 systemPrompt: SYSTEM_PROMPT,
@@ -275,6 +294,19 @@ export function createRuntime(config: ServiceConfig, executor: ToolExecutor = ne
             }
             turn.push(...toolMessages);
             sessionClient?.appendTurn(session.id, session.userId, turn);
+            // Auto session title: only the first completed turn of a session
+            // that began empty. Fire-and-log — detached from the chat stream,
+            // and any failure (LLM or session-manager) only warns.
+            if (sessionClient && session.agent.titlePending) {
+              session.agent.titlePending = false;
+              const llm = session.agent.llm;
+              void titleGenerator(llm, content ?? "")
+                .then((raw) => {
+                  const title = sanitizeTitle(raw);
+                  if (title) sessionClient.setTitle(session.id, title);
+                })
+                .catch((err: unknown) => console.warn(`title generation failed for ${session.id}:`, err));
+            }
           }
           call.end();
         })

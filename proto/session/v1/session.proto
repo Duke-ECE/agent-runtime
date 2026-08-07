@@ -17,6 +17,7 @@ service SessionService {
   rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
   rpc AppendTurn(AppendTurnRequest) returns (AppendTurnResponse);
   rpc GetTranscript(GetTranscriptRequest) returns (GetTranscriptResponse);
+  rpc SetTitle(SetTitleRequest) returns (SetTitleResponse);
 }
 
 message CreateSessionRequest {
@@ -74,6 +75,19 @@ message GetTranscriptResponse {
   repeated TurnMessage messages = 1;  // ordered by seq
 }
 
+// SetTitle sets the session's display title (e.g. an LLM-generated summary
+// of the first turn). Runtime-internal: service token required; setting a
+// title on an ended session is allowed (titles are editable metadata, not
+// transcript content).
+message SetTitleRequest {
+  string session_id = 1;
+  string title = 2;  // empty title is rejected
+}
+
+message SetTitleResponse {
+  Session session = 1;
+}
+
 message Session {
   string id = 1;
   string user_id = 2;
@@ -82,6 +96,7 @@ message Session {
   string created_at = 5;  // RFC 3339
   string last_active = 6;  // RFC 3339
   string ended_at = 7;  // RFC 3339, empty unless ended
+  string title = 8;  // optional display title
 }
 
 message TurnMessage {
