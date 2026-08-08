@@ -227,10 +227,15 @@ test("successful chat turn is written through to session-manager once", async (t
   assert.equal(append.token, "test-token");
   assert.deepEqual(
     append.messages.map((m) => m.role),
-    ["user", "assistant"],
+    ["config", "user", "assistant"],
   );
+  // First turn of a fresh session records the frozen LLM triple.
+  const configTurn = JSON.parse(append.messages[0].content_json);
+  assert.equal(configTurn.llm.api_key, "test-key");
+  assert.equal(configTurn.llm.model, "test-model");
+  assert.match(configTurn.llm.base_url, /^http:\/\/127\.0\.0\.1:\d+\/v1$/);
   assert.deepEqual(
-    append.messages.map((m) => JSON.parse(m.content_json)),
+    append.messages.slice(1).map((m) => JSON.parse(m.content_json)),
     // The assistant message carries the same token counts as the done frame.
     [{ content: "hi" }, { content: "Hello world", usage: { input_tokens: 3, output_tokens: 2 } }],
   );
@@ -257,10 +262,10 @@ test("tool events are recorded as tool_call/tool_result messages", async (t) => 
   const messages = appends[0].messages;
   assert.deepEqual(
     messages.map((m) => m.role),
-    ["user", "assistant", "tool_call", "tool_result"],
+    ["config", "user", "assistant", "tool_call", "tool_result"],
   );
-  assert.deepEqual(JSON.parse(messages[2].content_json), { tool: "bash", arguments_json: '{"command":"ls"}' });
-  assert.deepEqual(JSON.parse(messages[3].content_json), {
+  assert.deepEqual(JSON.parse(messages[3].content_json), { tool: "bash", arguments_json: '{"command":"ls"}' });
+  assert.deepEqual(JSON.parse(messages[4].content_json), {
     tool: "bash",
     ok: false,
     output: "",

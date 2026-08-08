@@ -24,6 +24,17 @@ export interface HydrateOptions {
   api: string;
 }
 
+/**
+ * The session's frozen LLM triple as recorded in transcript "config" turns
+ * (`content_json` `{"llm": {...}}`). All-string fields; a missing/absent
+ * field surfaces as "" (a key-less session records api_key "").
+ */
+export interface TranscriptLlm {
+  api_key: string;
+  base_url: string;
+  model: string;
+}
+
 /** Outcome of hydrating a durable transcript. */
 export interface HydrationResult {
   messages: AgentMessage[];
@@ -33,6 +44,12 @@ export interface HydrationResult {
    * never become pi conversation messages.
    */
   systemPrompt: string;
+  /**
+   * The transcript's LAST config turn (the session's frozen LLM triple), or
+   * all-"" fields when the transcript records none. Config turns never
+   * become pi conversation messages.
+   */
+  llm: TranscriptLlm;
 }
 
 function toTimestamp(createdAt: string | undefined): number {
@@ -64,6 +81,43 @@ function textPayload(turn: TranscriptTurn): string | undefined {
   return payload.content;
 }
 
+/**
+ * Parse a "config" turn's frozen LLM triple; returns undefined (after warning)
+ * on malformed input. Non-string fields surface as "".
+ */
+function parseConfigTurn(turn: TranscriptTurn): TranscriptLlm | undefined {
+  const payload = parsePayload(turn);
+  if (!payload) return undefined;
+  const llm = payload.llm;
+  if (!llm || typeof llm !== "object" || Array.isArray(llm)) {
+    console.warn(`hydration: skipping turn seq=${turn.seq} role=${turn.role}: missing "llm" object`);
+    return undefined;
+  }
+  const record = llm as Record<string, unknown>;
+  return {
+    api_key: typeof record.api_key === "string" ? record.api_key : "",
+    base_url: typeof record.base_url === "string" ? record.base_url : "",
+    model: typeof record.model === "string" ? record.model : "",
+  };
+}
+
+/**
+ * Extract the session's frozen LLM triple from raw transcript turns — the
+ * LAST valid "config" turn wins; undefined when the transcript records none
+ * (pre-config-turn transcripts and fresh sessions). CreateSession uses this
+ * before building the model: the frozen triple takes precedence over the
+ * request llm (snapshot semantics — a session's model never switches).
+ */
+export function extractTranscriptLlm(turns: TranscriptTurn[]): TranscriptLlm | undefined {
+  let llm: TranscriptLlm | undefined;
+  for (const turn of turns) {
+    if (turn.role !== "config") continue;
+    const parsed = parseConfigTurn(turn);
+    if (parsed) llm = parsed;
+  }
+  return llm;
+}
+
 function parseArguments(raw: unknown, seq: number, name: string): Record<string, unknown> {
   if (typeof raw === "string" && raw.length > 0) {
     try {
@@ -87,8 +141,11 @@ function parseArguments(raw: unknown, seq: number, name: string): Record<string,
  * toolCall message followed by its toolResult message, linked by a synthetic
  * `hydrated-<seq>` id. System turns (role "system", same `{"content": ...}`
  * shape as user turns) are collected into the result's `systemPrompt` — last
- * one wins — and never become pi messages. Unknown roles and malformed entries
- * are skipped with a warning — this function never throws. Payload keys
+ * one wins — and never become pi messages. Config turns (role "config",
+ * `{"llm": {api_key, base_url, model}}`) are collected into the result's
+ * `llm` — last one wins — and never become pi messages either. Unknown roles
+ * and malformed entries are skipped with a warning — this function never
+ * throws. Payload keys
  * beyond `content` (e.g. the optional `usage` object on assistant turns) are
  * ignored, so a windowed transcript that starts mid-tool-pair hydrates
  * cleanly too (the orphan tool_result is skipped like any other).
@@ -96,6 +153,7 @@ function parseArguments(raw: unknown, seq: number, name: string): Record<string,
 export function transcriptToMessages(turns: TranscriptTurn[], opts: HydrateOptions): HydrationResult {
   const messages: AgentMessage[] = [];
   let systemPrompt = "";
+  let llm: TranscriptLlm = { api_key: "", base_url: "", model: "" };
   for (let i = 0; i < turns.length; i++) {
     const turn = turns[i];
     const timestamp = toTimestamp(turn.createdAt);
@@ -104,6 +162,11 @@ export function transcriptToMessages(turns: TranscriptTurn[], opts: HydrateOptio
         const text = textPayload(turn);
         if (text === undefined) break;
         systemPrompt = text; // last system turn wins
+        break;
+      }
+      case "config": {
+        const parsed = parseConfigTurn(turn);
+        if (parsed) llm = parsed; // last config turn wins
         break;
       }
       case "user": {
@@ -185,5 +248,5 @@ export function transcriptToMessages(turns: TranscriptTurn[], opts: HydrateOptio
         break;
     }
   }
-  return { messages, systemPrompt };
+  return { messages, systemPrompt, llm };
 }

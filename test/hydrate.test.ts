@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
-import { transcriptToMessages, ZERO_USAGE } from "../src/hydrate.js";
+import { extractTranscriptLlm, transcriptToMessages, ZERO_USAGE } from "../src/hydrate.js";
 import type { TranscriptTurn } from "../src/session-client.js";
 
 const OPTS = { api: "openai-completions", provider: "openai-compatible", model: "test-model" };
@@ -12,8 +12,12 @@ function turn(seq: number, role: string, payload: unknown, createdAt: string | u
   return { seq, role, contentJson: typeof payload === "string" ? payload : JSON.stringify(payload), createdAt };
 }
 
-test("empty transcript yields no messages and no system prompt", () => {
-  assert.deepEqual(transcriptToMessages([], OPTS), { messages: [], systemPrompt: "" });
+test("empty transcript yields no messages, no system prompt, and no llm config", () => {
+  assert.deepEqual(transcriptToMessages([], OPTS), {
+    messages: [],
+    systemPrompt: "",
+    llm: { api_key: "", base_url: "", model: "" },
+  });
 });
 
 test("user and assistant turns map to text messages", () => {
@@ -182,4 +186,71 @@ test("assistant turns carrying a persisted usage payload hydrate, the extra key 
   const assistant = messages[0] as AssistantMessage;
   assert.deepEqual(assistant.content, [{ type: "text", text: "hello" }]);
   assert.deepEqual(assistant.usage, ZERO_USAGE);
+});
+
+test("config turns surface as llm (last wins) and never become messages", () => {
+  const result = transcriptToMessages(
+    [
+      turn(1, "config", { llm: { api_key: "sk-old", base_url: "https://old.example/v1", model: "old-model" } }),
+      turn(2, "user", { content: "hi" }),
+      turn(3, "assistant", { content: "hello" }),
+      turn(4, "config", { llm: { api_key: "sk-new", base_url: "https://new.example/v1", model: "new-model" } }),
+      turn(5, "user", { content: "again" }),
+    ],
+    OPTS,
+  );
+  assert.deepEqual(result.llm, { api_key: "sk-new", base_url: "https://new.example/v1", model: "new-model" });
+  assert.deepEqual(
+    result.messages.map((m) => m.role),
+    ["user", "assistant", "user"],
+  );
+});
+
+test("malformed config turns are skipped, earlier valid one still wins; missing fields default to ''", () => {
+  const result = transcriptToMessages(
+    [
+      turn(1, "config", { llm: { api_key: "sk-kept" } }), // base_url/model missing -> ""
+      turn(2, "config", "not json at all"),
+      turn(3, "config", { unexpected: true }),
+      turn(4, "config", { llm: "not an object" }),
+      turn(5, "config", { llm: { api_key: 42, base_url: null, model: "m" } }), // non-string fields -> ""
+    ],
+    OPTS,
+  );
+  // The last VALID config turn wins: seq 5 parses (with lenient defaults).
+  assert.deepEqual(result.llm, { api_key: "", base_url: "", model: "m" });
+  assert.deepEqual(result.messages, []);
+
+  const onlyValid = transcriptToMessages(
+    [turn(1, "config", { llm: { api_key: "sk-kept" } }), turn(2, "config", "{broken")],
+    OPTS,
+  );
+  assert.deepEqual(onlyValid.llm, { api_key: "sk-kept", base_url: "", model: "" });
+});
+
+test("a transcript without config turns yields an all-empty llm", () => {
+  const result = transcriptToMessages([turn(1, "user", { content: "hi" })], OPTS);
+  assert.deepEqual(result.llm, { api_key: "", base_url: "", model: "" });
+  assert.equal(result.messages.length, 1);
+});
+
+test("extractTranscriptLlm: last config turn wins, undefined without one, malformed skipped", () => {
+  assert.equal(extractTranscriptLlm([turn(1, "user", { content: "hi" })]), undefined);
+  assert.equal(extractTranscriptLlm([]), undefined);
+  assert.equal(extractTranscriptLlm([turn(1, "config", "{broken")]), undefined);
+  assert.deepEqual(
+    extractTranscriptLlm([
+      turn(1, "config", { llm: { api_key: "sk-1", base_url: "https://a/v1", model: "m1" } }),
+      turn(2, "config", "not json"),
+      turn(3, "config", { llm: { api_key: "sk-2", base_url: "https://b/v1", model: "m2" } }),
+    ]),
+    { api_key: "sk-2", base_url: "https://b/v1", model: "m2" },
+  );
+  // A key-less triple (api_key "") is still a valid extraction — callers
+  // decide whether it takes over.
+  assert.deepEqual(extractTranscriptLlm([turn(1, "config", { llm: { api_key: "", base_url: "", model: "" } })]), {
+    api_key: "",
+    base_url: "",
+    model: "",
+  });
 });

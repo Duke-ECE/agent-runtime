@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
-import { createRuntime } from "../src/server.js";
+import { createRuntime, type Runtime } from "../src/server.js";
 import type { ServiceConfig } from "../src/config.js";
 
 function loadProto(rel: string): any {
@@ -132,29 +132,32 @@ async function startFakeSessionManager(transcript: TranscriptMessage[]): Promise
 
 async function setup(
   t: import("node:test").TestContext,
-  opts: { replies: string[]; transcript?: TranscriptMessage[] },
+  opts: { replies: string[]; transcript?: TranscriptMessage[] | ((llmUrl: string) => TranscriptMessage[]) },
 ): Promise<{
+  runtime: Runtime;
+  llmUrl: string;
   createSession: (req: unknown) => Promise<{ session_id: string }>;
   chat: (req: unknown) => Promise<any[]>;
   appends: AppendCall[];
 }> {
   const llm = await startFakeLlm(opts.replies);
-  const sessionManager = await startFakeSessionManager(opts.transcript ?? []);
+  const transcript = typeof opts.transcript === "function" ? opts.transcript(llm.url) : (opts.transcript ?? []);
+  const sessionManager = await startFakeSessionManager(transcript);
 
   const config: ServiceConfig = {
     port: 0,
     maxSessions: 20,
     sessionTtlMinutes: 30,
-    llm: { apiKey: "test-key", baseUrl: llm.url, model: "test-model" },
+    llm: { apiKey: "env-key", baseUrl: llm.url, model: "env-model" },
     sessionManagerAddr: sessionManager.addr,
     serviceToken: "test-token",
     hydrationMaxTurns: 50,
   };
   // Stub the title generator so fresh-session titles don't consume scripted
   // LLM replies or interleave with the chat requests under test.
-  const { server } = createRuntime(config, undefined, { titleGenerator: () => Promise.resolve("") });
+  const runtime = createRuntime(config, undefined, { titleGenerator: () => Promise.resolve("") });
   const port = await new Promise<number>((resolve, reject) => {
-    server.bindAsync("127.0.0.1:0", grpc.ServerCredentials.createInsecure(), (err, p) =>
+    runtime.server.bindAsync("127.0.0.1:0", grpc.ServerCredentials.createInsecure(), (err, p) =>
       err ? reject(err) : resolve(p),
     );
   });
@@ -163,7 +166,7 @@ async function setup(
 
   t.after(async () => {
     raw.close();
-    await new Promise<void>((resolve) => server.tryShutdown(() => resolve()));
+    await new Promise<void>((resolve) => runtime.server.tryShutdown(() => resolve()));
     await sessionManager.close();
     await llm.close();
   });
@@ -182,7 +185,7 @@ async function setup(
         .on("end", () => resolve(events))
         .on("error", reject);
     });
-  return { createSession, chat, appends: sessionManager.appends };
+  return { runtime, llmUrl: llm.url, createSession, chat, appends: sessionManager.appends };
 }
 
 async function waitFor(cond: () => boolean, timeoutMs = 2_000): Promise<void> {
@@ -195,82 +198,154 @@ async function waitFor(cond: () => boolean, timeoutMs = 2_000): Promise<void> {
 
 const roles = (append: AppendCall) => append.messages.map((m) => m.role);
 
-test("fresh session with a system prompt records it once, before the first turn's messages", async (t) => {
-  const { createSession, chat, appends } = await setup(t, { replies: ["reply one", "reply two"] });
-  const { session_id } = await createSession({ user_id: "alice", system_prompt: "You are a pirate tutor." });
+/** The session's resolved LLM triple as the runtime sees it. */
+function resolvedLlm(runtime: Runtime, sessionId: string): { apiKey?: string; baseUrl: string; model: string } {
+  return runtime.sessions.get(sessionId).agent.llm;
+}
 
-  await chat({ session_id, content: "hi", user_id: "alice" });
-  await waitFor(() => appends.length === 1);
-  // System turn first, then the frozen LLM config turn, then the conversation.
-  assert.deepEqual(roles(appends[0]), ["system", "config", "user", "assistant"]);
-  assert.deepEqual(JSON.parse(appends[0].messages[0].content_json), { content: "You are a pirate tutor." });
-  const configTurn = JSON.parse(appends[0].messages[1].content_json);
-  assert.equal(configTurn.llm.api_key, "test-key");
-  assert.equal(configTurn.llm.model, "test-model");
-
-  await chat({ session_id, content: "again", user_id: "alice" });
-  await waitFor(() => appends.length === 2);
-  // Unchanged prompt and triple: neither re-recorded.
-  assert.deepEqual(roles(appends[1]), ["user", "assistant"]);
-});
-
-test("session with an empty system prompt never records a system message", async (t) => {
-  const { createSession, chat, appends } = await setup(t, { replies: ["reply one", "reply two"] });
-  const { session_id } = await createSession({ user_id: "alice", system_prompt: "" });
-
-  await chat({ session_id, content: "hi", user_id: "alice" });
-  await chat({ session_id, content: "again", user_id: "alice" });
-  await waitFor(() => appends.length === 2);
-  // First turn still records the frozen LLM triple; no system turn anywhere.
-  assert.deepEqual(roles(appends[0]), ["config", "user", "assistant"]);
-  assert.deepEqual(roles(appends[1]), ["user", "assistant"]);
-});
-
-test("resumed session with an unchanged prompt does not re-record the transcript's system message", async (t) => {
-  const { createSession, chat, appends } = await setup(t, {
-    replies: ["reply one"],
-    transcript: [
-      transcriptMessage(1, "system", { content: "You are a pirate tutor." }),
-      transcriptMessage(2, "user", { content: "hi" }),
-      transcriptMessage(3, "assistant", { content: "ahoy" }),
-    ],
-  });
-  // Template deleted: the backend sends no system_prompt on resume.
-  const { session_id } = await createSession({ user_id: "alice", session_id: "sess-resumed-same" });
-  assert.equal(session_id, "sess-resumed-same");
-
-  await chat({ session_id, content: "again", user_id: "alice" });
-  await waitFor(() => appends.length === 1);
-  // Unchanged prompt is not re-recorded, but the pre-config-turn transcript
-  // has no config marker yet, so the frozen triple is recorded once.
-  assert.deepEqual(roles(appends[0]), ["config", "user", "assistant"]);
-});
-
-test("resumed session whose request prompt differs from the recorded one re-records it on the next turn", async (t) => {
-  const { createSession, chat, appends } = await setup(t, {
-    replies: ["reply one", "reply two"],
-    transcript: [
-      transcriptMessage(1, "system", { content: "old persona" }),
-      transcriptMessage(2, "user", { content: "hi" }),
-      transcriptMessage(3, "assistant", { content: "ahoy" }),
-    ],
-  });
-  // Template edited since: the backend sends the new prompt on resume.
+test("fresh session records its frozen LLM triple on the first AppendTurn, then not again", async (t) => {
+  const { runtime, llmUrl, createSession, chat, appends } = await setup(t, { replies: ["reply one", "reply two"] });
   const { session_id } = await createSession({
     user_id: "alice",
-    session_id: "sess-resumed-edited",
-    system_prompt: "new persona",
+    llm: { api_key: "sk-custom", base_url: llmUrl, model: "custom-model" },
+  });
+
+  // The request llm wins over env for a fresh session.
+  assert.deepEqual(resolvedLlm(runtime, session_id), { apiKey: "sk-custom", baseUrl: llmUrl, model: "custom-model" });
+
+  await chat({ session_id, content: "hi", user_id: "alice" });
+  await waitFor(() => appends.length === 1);
+  // No system prompt: the config turn leads the turn's messages.
+  assert.deepEqual(roles(appends[0]), ["config", "user", "assistant"]);
+  assert.deepEqual(JSON.parse(appends[0].messages[0].content_json), {
+    llm: { api_key: "sk-custom", base_url: llmUrl, model: "custom-model" },
+  });
+
+  await chat({ session_id, content: "again", user_id: "alice" });
+  await waitFor(() => appends.length === 2);
+  // Unchanged triple: not re-recorded.
+  assert.deepEqual(roles(appends[1]), ["user", "assistant"]);
+});
+
+test("resume: transcript config beats the request llm (frozen triple wins)", async (t) => {
+  const { runtime, llmUrl, createSession, chat, appends } = await setup(t, {
+    replies: ["reply one"],
+    transcript: (url) => [
+      transcriptMessage(1, "config", { llm: { api_key: "sk-frozen", base_url: url, model: "frozen-model" } }),
+      transcriptMessage(2, "user", { content: "hi" }),
+      transcriptMessage(3, "assistant", { content: "hello" }),
+    ],
+  });
+  const { session_id } = await createSession({
+    user_id: "alice",
+    session_id: "sess-frozen",
+    llm: { api_key: "sk-ignored", base_url: "http://127.0.0.1:1/v1", model: "ignored-model" },
+  });
+
+  // The transcript's frozen triple wins over the request llm entirely.
+  assert.deepEqual(resolvedLlm(runtime, session_id), {
+    apiKey: "sk-frozen",
+    baseUrl: llmUrl,
+    model: "frozen-model",
+  });
+  assert.equal(runtime.sessions.get(session_id).agent.agent.state.model.id, "frozen-model");
+
+  await chat({ session_id, content: "again", user_id: "alice" });
+  await waitFor(() => appends.length === 1);
+  // Marker seeded from the transcript: unchanged triple is not re-recorded.
+  assert.deepEqual(roles(appends[0]), ["user", "assistant"]);
+});
+
+test("resume: request llm is used when the transcript has no config turn", async (t) => {
+  const { runtime, llmUrl, createSession, chat, appends } = await setup(t, {
+    replies: ["reply one"],
+    transcript: [transcriptMessage(1, "user", { content: "hi" })],
+  });
+  const { session_id } = await createSession({
+    user_id: "alice",
+    session_id: "sess-pre-config",
+    llm: { api_key: "sk-request", base_url: llmUrl, model: "request-model" },
+  });
+
+  assert.deepEqual(resolvedLlm(runtime, session_id), {
+    apiKey: "sk-request",
+    baseUrl: llmUrl,
+    model: "request-model",
   });
 
   await chat({ session_id, content: "again", user_id: "alice" });
   await waitFor(() => appends.length === 1);
-  // Changed prompt re-recorded; the pre-config-turn transcript also gets its
-  // first config marker, placed between the system and user turns.
-  assert.deepEqual(roles(appends[0]), ["system", "config", "user", "assistant"]);
-  assert.deepEqual(JSON.parse(appends[0].messages[0].content_json), { content: "new persona" });
+  // Pre-config-turn transcript: the resolved triple is recorded once.
+  assert.deepEqual(roles(appends[0]), ["config", "user", "assistant"]);
+  assert.deepEqual(JSON.parse(appends[0].messages[0].content_json), {
+    llm: { api_key: "sk-request", base_url: llmUrl, model: "request-model" },
+  });
+});
 
-  await chat({ session_id, content: "once more", user_id: "alice" });
-  await waitFor(() => appends.length === 2);
-  // Now the recorded prompt and triple match: neither repeated.
-  assert.deepEqual(roles(appends[1]), ["user", "assistant"]);
+test("resume: a config turn with an empty api_key does not override a keyed request llm", async (t) => {
+  const { runtime, llmUrl, createSession, chat, appends } = await setup(t, {
+    replies: ["reply one"],
+    transcript: [
+      transcriptMessage(1, "config", { llm: { api_key: "", base_url: "", model: "" } }),
+      transcriptMessage(2, "user", { content: "hi" }),
+    ],
+  });
+  const { session_id } = await createSession({
+    user_id: "alice",
+    session_id: "sess-empty-frozen",
+    llm: { api_key: "sk-request", base_url: llmUrl, model: "request-model" },
+  });
+
+  // Empty frozen key: the request llm resolution takes over.
+  assert.deepEqual(resolvedLlm(runtime, session_id), {
+    apiKey: "sk-request",
+    baseUrl: llmUrl,
+    model: "request-model",
+  });
+
+  await chat({ session_id, content: "again", user_id: "alice" });
+  await waitFor(() => appends.length === 1);
+  // The recorded triple (all-empty) differs from the resolved one: re-recorded.
+  assert.deepEqual(roles(appends[0]), ["config", "user", "assistant"]);
+  assert.deepEqual(JSON.parse(appends[0].messages[0].content_json), {
+    llm: { api_key: "sk-request", base_url: llmUrl, model: "request-model" },
+  });
+});
+
+test("template LLM changed after the session started: resume keeps the ORIGINAL triple", async (t) => {
+  const { runtime, llmUrl, createSession, chat, appends } = await setup(t, {
+    replies: ["reply one"],
+    transcript: (url) => [
+      transcriptMessage(1, "config", { llm: { api_key: "sk-original", base_url: url, model: "original-model" } }),
+      transcriptMessage(2, "user", { content: "hi" }),
+      transcriptMessage(3, "assistant", { content: "hello" }),
+    ],
+  });
+  // The template's LLM was edited since: the backend re-resolves the template
+  // and sends its CURRENT triple on resume. It must be ignored.
+  const { session_id } = await createSession({
+    user_id: "alice",
+    session_id: "sess-template-edited",
+    llm: { api_key: "sk-changed", base_url: "http://127.0.0.1:1/v1", model: "changed-model" },
+  });
+
+  assert.deepEqual(resolvedLlm(runtime, session_id), {
+    apiKey: "sk-original",
+    baseUrl: llmUrl,
+    model: "original-model",
+  });
+  // Hydrated history is stamped with the frozen model's identity too.
+  const state = runtime.sessions.get(session_id).agent.agent.state;
+  assert.equal(state.model.id, "original-model");
+  assert.deepEqual(
+    (state.messages as Array<{ role: string; model?: string }>).map((m) => [m.role, m.model]),
+    [
+      ["user", undefined],
+      ["assistant", "original-model"],
+    ],
+  );
+
+  await chat({ session_id, content: "again", user_id: "alice" });
+  await waitFor(() => appends.length === 1);
+  assert.deepEqual(roles(appends[0]), ["user", "assistant"]);
 });

@@ -59,7 +59,8 @@ session-manager — only warn and never affect the chat path.
 
 LLM config resolution per session: `CreateSession.llm` (api_key / base_url /
 model) wins; anything absent falls back to `LLM_API_KEY` / `LLM_BASE_URL` /
-`LLM_MODEL` env vars.
+`LLM_MODEL` env vars. Once a session has started, though, its LLM triple is
+**frozen**: see the config-turn paragraph below.
 
 `CreateSession` also accepts an optional `system_prompt` (empty = no system
 prompt — the runtime carries no built-in default; the platform's "Default
@@ -79,11 +80,29 @@ was deleted keeps its persona from the transcript. Hydration seeds the
 unchanged prompt is not re-recorded; system turns never become pi conversation
 messages (the last one wins, malformed ones are skipped with a warning).
 
+The session's resolved LLM triple is likewise persisted, as `role: "config"`
+messages (content_json `{"llm": {"api_key": ..., "base_url": ..., "model": ...}}`,
+recorded faithfully as-is — `api_key` may be `""` when no key was resolved):
+the first `AppendTurn` that finds no matching config turn recorded prepends
+one, after the system message (if any) and before the user message. Resume
+precedence is deliberately **asymmetric** with the system prompt: the
+transcript's last config turn WINS over the request `llm` (snapshot semantics —
+once a session starts, its model must never switch, so editing the agent
+template's LLM or the platform default cannot affect existing sessions), while
+for the prompt the request value wins (reference semantics — a live template's
+current prompt governs). The request/env resolution above is only the fallback
+for fresh sessions and pre-config-turn transcripts; a config turn with an
+empty `api_key` does not take over (it merely records that no key was resolved
+at the time). Hydration seeds the "last recorded" marker from the transcript's
+last config turn (last one wins, malformed skipped with a warning, never a pi
+message), so an unchanged triple is not re-recorded.
+
 Assistant transcript messages also carry the turn's token usage: content_json
 is `{"content": "...", "usage": {"input_tokens": N, "output_tokens": M}}`
 (JSON numbers, the same counts sent in the Chat `done` event; the `usage` key
 is omitted when the provider reported none). The frontend reads it to show
-historical usage. User, system, and tool messages keep their plain shapes.
+historical usage. User, system, config, and tool messages keep their plain
+shapes.
 Hydration ignores the extra key (hydrated assistant messages get zero usage).
 
 ## Tools

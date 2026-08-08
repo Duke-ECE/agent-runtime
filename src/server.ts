@@ -4,9 +4,9 @@ import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { loadConfig, type ServiceConfig } from "./config.js";
-import { transcriptToMessages } from "./hydrate.js";
+import { extractTranscriptLlm, transcriptToMessages } from "./hydrate.js";
 import { createModel, createStreamFn, type SessionLlmConfig } from "./llm.js";
-import { createSessionClient, type TurnMessageInput } from "./session-client.js";
+import { createSessionClient, type TranscriptTurn, type TurnMessageInput } from "./session-client.js";
 import { SessionManager, assertOwner, grpcError } from "./session-manager.js";
 import { generateTitle, sanitizeTitle, type TitleGenerator } from "./title.js";
 import { buildTools, NullExecutor, type ToolExecutor } from "./tools.js";
@@ -28,6 +28,13 @@ interface RuntimeSession {
    * is not re-recorded; undefined when nothing has been recorded yet.
    */
   lastRecordedSystemPrompt?: string;
+  /**
+   * JSON of the last LLM triple recorded in the durable transcript as a
+   * "config" turn (`{api_key, base_url, model}`). Seeded from the
+   * transcript's last config turn during hydration so an unchanged triple is
+   * not re-recorded; undefined when nothing has been recorded yet.
+   */
+  lastRecordedLlm?: string;
 }
 
 function resolveProtoPath(): string {
@@ -143,14 +150,14 @@ export function createRuntime(
         sessionTools = allTools.filter((t) => toolNames.includes(t.name));
       }
       try {
-        const resolved = resolveLlm(llm);
-        const model = createModel(resolved);
-        // Hydration: a caller-provided session id may have a durable transcript
-        // in session-manager (e.g. after a runtime restart). Fetch it before
-        // the agent is constructed so it can seed initialState.messages.
-        // Fail-open: any problem leaves the session with empty history.
-        let history: AgentMessage[] | undefined;
-        let transcriptSystemPrompt = "";
+        // Hydration fetch first: a caller-provided session id may have a
+        // durable transcript in session-manager (e.g. after a runtime
+        // restart), and the transcript may carry the session's FROZEN LLM
+        // triple (role "config" turns), which must be known before the model
+        // is built. Fail-open: any problem leaves the session with empty
+        // history.
+        let transcriptTurns: TranscriptTurn[] | undefined;
+        let transcriptHasMore = false;
         if (session_id && sessionClient) {
           try {
             // Windowed hydration: fetch only the latest HYDRATION_MAX_TURNS
@@ -158,36 +165,62 @@ export function createRuntime(
             // cost stays bounded as sessions grow. transcriptToMessages needs
             // no changes — its existing leniency already skips an orphan
             // tool_result at the window's start or a dangling tool_call at
-            // its end. Tradeoff: the system-prompt fallback lives in the
-            // transcript's LAST system turn, so when the window contains no
-            // system turn the fallback is simply absent (empty) — the same as
-            // resuming a prompt-less session. That only affects sessions
-            // whose template was deleted AND whose transcript outgrew the
-            // window; a live template's request system_prompt always wins.
+            // its end. Tradeoff: the system-prompt and frozen-LLM fallbacks
+            // live in the transcript's LAST system/config turn, so when the
+            // window contains no such turn the fallback is simply absent —
+            // the same as resuming a prompt-less, pre-config-turn session.
+            // For the prompt that only affects sessions whose template was
+            // deleted AND whose transcript outgrew the window; a live
+            // template's request system_prompt always wins (the frozen LLM
+            // triple needs no request winner — see below).
             const transcript = await sessionClient.getTranscript(session_id, {
               limit: config.hydrationMaxTurns,
               beforeSeq: 0,
             });
             if (transcript && transcript.messages.length > 0) {
-              const hydrated = transcriptToMessages(transcript.messages, {
-                api: model.api,
-                provider: model.provider,
-                model: model.id,
-              });
-              transcriptSystemPrompt = hydrated.systemPrompt;
-              if (hydrated.messages.length > 0) {
-                history = hydrated.messages;
-                console.log(`hydrated session ${session_id} with ${hydrated.messages.length} messages from transcript`);
-              }
-              if (transcript.hasMore) {
-                console.log(
-                  `hydration for session ${session_id}: earlier transcript history skipped ` +
-                    `(window limited to the latest ${config.hydrationMaxTurns} messages)`,
-                );
-              }
+              transcriptTurns = transcript.messages;
+              transcriptHasMore = transcript.hasMore;
             }
           } catch (err) {
             console.warn(`hydration failed for ${session_id}, starting with empty history:`, err);
+          }
+        }
+        // LLM precedence — deliberately ASYMMETRIC vs the system prompt
+        // below: the transcript's frozen config turn WINS over the request
+        // llm (snapshot semantics: once a session starts, its model must
+        // never switch — editing the agent template's LLM or the platform
+        // default must not affect existing sessions), while for the system
+        // prompt the request value wins (reference semantics: a live
+        // template's current prompt governs). The request/env resolution is
+        // the fallback for pre-config-turn transcripts and fresh sessions.
+        // A config turn with an empty api_key does NOT take over — it merely
+        // records that no key was resolved at the time.
+        const frozenLlm = transcriptTurns ? extractTranscriptLlm(transcriptTurns) : undefined;
+        const resolved: SessionLlmConfig =
+          frozenLlm && frozenLlm.api_key
+            ? { apiKey: frozenLlm.api_key, baseUrl: frozenLlm.base_url, model: frozenLlm.model }
+            : resolveLlm(llm);
+        const model = createModel(resolved);
+        // Convert the fetched transcript into pi messages, stamped with the
+        // resolved model's identity, so it can seed initialState.messages.
+        let history: AgentMessage[] | undefined;
+        let transcriptSystemPrompt = "";
+        if (transcriptTurns) {
+          const hydrated = transcriptToMessages(transcriptTurns, {
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+          });
+          transcriptSystemPrompt = hydrated.systemPrompt;
+          if (hydrated.messages.length > 0) {
+            history = hydrated.messages;
+            console.log(`hydrated session ${session_id} with ${hydrated.messages.length} messages from transcript`);
+          }
+          if (transcriptHasMore) {
+            console.log(
+              `hydration for session ${session_id}: earlier transcript history skipped ` +
+                `(window limited to the latest ${config.hydrationMaxTurns} messages)`,
+            );
           }
         }
         // System prompt precedence: a non-empty request system_prompt wins
@@ -205,9 +238,12 @@ export function createRuntime(
             // first completed turn; hydrated/history-seeded sessions don't.
             titlePending: !history,
             systemPrompt,
-            // Seed the "last recorded" marker from the transcript so an
-            // unchanged prompt is not re-recorded on the next AppendTurn.
+            // Seed the "last recorded" markers from the transcript so an
+            // unchanged prompt/triple is not re-recorded on the next
+            // AppendTurn. A transcript without a config turn leaves the LLM
+            // marker undefined, so the first AppendTurn records the triple.
             lastRecordedSystemPrompt: transcriptSystemPrompt || undefined,
+            lastRecordedLlm: frozenLlm ? JSON.stringify(frozenLlm) : undefined,
             agent: new Agent({
               initialState: {
                 systemPrompt,
@@ -361,6 +397,24 @@ export function createRuntime(
                 createdAt: now,
               });
               session.agent.lastRecordedSystemPrompt = session.agent.systemPrompt;
+            }
+            // Persist the session's FROZEN LLM triple as a transcript
+            // "config" message whenever it differs from the last one
+            // recorded (first turn of a fresh session, or a pre-config-turn
+            // transcript resumed with a different resolution). Placed after
+            // the system message, before the user message. The triple is
+            // recorded faithfully as-is — api_key may be "" (no key
+            // resolved); AppendTurn is fire-and-log, so the marker is
+            // updated optimistically.
+            const llmSnapshot = {
+              api_key: session.agent.llm.apiKey ?? "",
+              base_url: session.agent.llm.baseUrl,
+              model: session.agent.llm.model,
+            };
+            const llmJson = JSON.stringify(llmSnapshot);
+            if (llmJson !== session.agent.lastRecordedLlm) {
+              turn.push({ role: "config", contentJson: JSON.stringify({ llm: llmSnapshot }), createdAt: now });
+              session.agent.lastRecordedLlm = llmJson;
             }
             turn.push({ role: "user", contentJson: JSON.stringify({ content: content ?? "" }), createdAt: now });
             if (assistantText) {
