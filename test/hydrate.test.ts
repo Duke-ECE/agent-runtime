@@ -12,12 +12,12 @@ function turn(seq: number, role: string, payload: unknown, createdAt: string | u
   return { seq, role, contentJson: typeof payload === "string" ? payload : JSON.stringify(payload), createdAt };
 }
 
-test("empty transcript yields no messages", () => {
-  assert.deepEqual(transcriptToMessages([], OPTS), []);
+test("empty transcript yields no messages and no system prompt", () => {
+  assert.deepEqual(transcriptToMessages([], OPTS), { messages: [], systemPrompt: "" });
 });
 
 test("user and assistant turns map to text messages", () => {
-  const messages = transcriptToMessages(
+  const { messages } = transcriptToMessages(
     [turn(1, "user", { content: "hi" }), turn(2, "assistant", { content: "hello there" })],
     OPTS,
   );
@@ -40,7 +40,7 @@ test("user and assistant turns map to text messages", () => {
 });
 
 test("tool_call pairs with the following tool_result of the same tool", () => {
-  const messages = transcriptToMessages(
+  const { messages } = transcriptToMessages(
     [
       turn(1, "user", { content: "list files" }),
       turn(2, "tool_call", { tool: "bash", arguments_json: '{"command":"ls"}' }),
@@ -72,7 +72,7 @@ test("failed tool_result hydrates as isError, error text preferred over output",
       turn(2, "tool_result", { tool: "bash", ok: false, output: "", error: "boom" }),
     ],
     OPTS,
-  );
+  ).messages;
   const failed = withError[1] as ToolResultMessage;
   assert.equal(failed.isError, true);
   assert.deepEqual(failed.content, [{ type: "text", text: "boom" }]);
@@ -83,14 +83,14 @@ test("failed tool_result hydrates as isError, error text preferred over output",
       turn(2, "tool_result", { tool: "bash", ok: false, output: "partial output", error: "" }),
     ],
     OPTS,
-  );
+  ).messages;
   const fallback = withOutputOnly[1] as ToolResultMessage;
   assert.equal(fallback.isError, true);
   assert.deepEqual(fallback.content, [{ type: "text", text: "partial output" }]);
 });
 
 test("malformed, unknown, and orphan entries are skipped", () => {
-  const messages = transcriptToMessages(
+  const { messages } = transcriptToMessages(
     [
       turn(1, "user", "not json at all"),
       turn(2, "user", { unexpected: true }),
@@ -112,7 +112,7 @@ test("malformed, unknown, and orphan entries are skipped", () => {
 });
 
 test("tool_call with bad arguments_json falls back to {}", () => {
-  const messages = transcriptToMessages(
+  const { messages } = transcriptToMessages(
     [
       turn(1, "tool_call", { tool: "bash", arguments_json: "{not json" }),
       turn(2, "tool_result", { tool: "bash", ok: true, output: "ok", error: "" }),
@@ -128,10 +128,47 @@ test("missing or invalid created_at falls back to now", () => {
   const before = Date.now();
   // Note: turn() defaults createdAt to TS, so the missing case is built literally.
   const missing: TranscriptTurn = { seq: 1, role: "user", contentJson: JSON.stringify({ content: "a" }) };
-  const messages = transcriptToMessages([missing, turn(2, "user", { content: "b" }, "not a date")], OPTS);
+  const { messages } = transcriptToMessages([missing, turn(2, "user", { content: "b" }, "not a date")], OPTS);
   const after = Date.now();
   assert.equal(messages.length, 2);
   for (const m of messages) {
     assert.ok(m.timestamp >= before && m.timestamp <= after, `timestamp ${m.timestamp} within [${before}, ${after}]`);
   }
+});
+
+test("system turns surface as systemPrompt (last wins) and never become messages", () => {
+  const result = transcriptToMessages(
+    [
+      turn(1, "system", { content: "You are a pirate tutor." }),
+      turn(2, "user", { content: "hi" }),
+      turn(3, "assistant", { content: "ahoy" }),
+      turn(4, "system", { content: "You are a terse reviewer." }),
+      turn(5, "user", { content: "again" }),
+    ],
+    OPTS,
+  );
+  assert.equal(result.systemPrompt, "You are a terse reviewer.");
+  assert.deepEqual(
+    result.messages.map((m) => m.role),
+    ["user", "assistant", "user"],
+  );
+});
+
+test("malformed system turns are skipped, earlier valid one still wins", () => {
+  const result = transcriptToMessages(
+    [
+      turn(1, "system", { content: "kept" }),
+      turn(2, "system", "not json at all"),
+      turn(3, "system", { unexpected: true }),
+    ],
+    OPTS,
+  );
+  assert.equal(result.systemPrompt, "kept");
+  assert.deepEqual(result.messages, []);
+});
+
+test("a transcript without system turns yields an empty systemPrompt", () => {
+  const result = transcriptToMessages([turn(1, "user", { content: "hi" })], OPTS);
+  assert.equal(result.systemPrompt, "");
+  assert.equal(result.messages.length, 1);
 });

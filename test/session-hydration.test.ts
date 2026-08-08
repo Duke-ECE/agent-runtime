@@ -233,3 +233,55 @@ test("CreateSession on resume applies the passed system_prompt and tools to the 
     ["user", "assistant"],
   );
 });
+
+test("CreateSession on resume: request system_prompt beats the transcript's last system message", async (t) => {
+  const sessionManager = await startFakeSessionManager({
+    transcript: [
+      transcriptMessage(1, "system", { content: "You are a pirate tutor." }),
+      transcriptMessage(2, "user", { content: "hi" }),
+    ],
+  });
+  t.after(sessionManager.close);
+  const { runtime, createSession } = await setup(t, sessionManager.addr);
+
+  const created = await createSession({
+    user_id: "alice",
+    session_id: "sess-request-wins",
+    system_prompt: "You are a terse reviewer.",
+  });
+  const state = runtime.sessions.get(created.session_id).agent.agent.state;
+  assert.equal(state.systemPrompt, "You are a terse reviewer.");
+});
+
+test("CreateSession on resume: transcript's last system message is the fallback prompt", async (t) => {
+  const sessionManager = await startFakeSessionManager({
+    transcript: [
+      transcriptMessage(1, "system", { content: "old persona" }),
+      transcriptMessage(2, "user", { content: "hi" }),
+      transcriptMessage(3, "assistant", { content: "hello" }),
+      transcriptMessage(4, "system", { content: "newest persona" }),
+    ],
+  });
+  t.after(sessionManager.close);
+  const { runtime, createSession } = await setup(t, sessionManager.addr);
+
+  const created = await createSession({ user_id: "alice", session_id: "sess-transcript-wins" });
+  const state = runtime.sessions.get(created.session_id).agent.agent.state;
+  // Last system message wins; system turns never enter the pi history.
+  assert.equal(state.systemPrompt, "newest persona");
+  assert.deepEqual(
+    state.messages.map((m: { role: string }) => m.role),
+    ["user", "assistant"],
+  );
+});
+
+test("CreateSession on resume: no request prompt and no transcript system message means none", async (t) => {
+  const sessionManager = await startFakeSessionManager({
+    transcript: [transcriptMessage(1, "user", { content: "hi" })],
+  });
+  t.after(sessionManager.close);
+  const { runtime, createSession } = await setup(t, sessionManager.addr);
+
+  const created = await createSession({ user_id: "alice", session_id: "sess-no-prompt" });
+  assert.equal(runtime.sessions.get(created.session_id).agent.agent.state.systemPrompt, "");
+});

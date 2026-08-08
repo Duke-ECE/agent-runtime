@@ -22,6 +22,17 @@ export interface HydrateOptions {
   api: string;
 }
 
+/** Outcome of hydrating a durable transcript. */
+export interface HydrationResult {
+  messages: AgentMessage[];
+  /**
+   * Content of the transcript's LAST system turn (the session's persisted
+   * system prompt), or "" when the transcript records none. System turns
+   * never become pi conversation messages.
+   */
+  systemPrompt: string;
+}
+
 function toTimestamp(createdAt: string | undefined): number {
   const parsed = createdAt ? Date.parse(createdAt) : Number.NaN;
   return Number.isNaN(parsed) ? Date.now() : parsed;
@@ -72,15 +83,24 @@ function parseArguments(raw: unknown, seq: number, name: string): Record<string,
  * assistant text per turn plus tool_call/tool_result pairs (see the AppendTurn
  * call site in server.ts); tool pairs are rebuilt into an assistant
  * toolCall message followed by its toolResult message, linked by a synthetic
- * `hydrated-<seq>` id. Unknown roles and malformed entries are skipped with a
- * warning — this function never throws.
+ * `hydrated-<seq>` id. System turns (role "system", same `{"content": ...}`
+ * shape as user turns) are collected into the result's `systemPrompt` — last
+ * one wins — and never become pi messages. Unknown roles and malformed entries
+ * are skipped with a warning — this function never throws.
  */
-export function transcriptToMessages(turns: TranscriptTurn[], opts: HydrateOptions): AgentMessage[] {
+export function transcriptToMessages(turns: TranscriptTurn[], opts: HydrateOptions): HydrationResult {
   const messages: AgentMessage[] = [];
+  let systemPrompt = "";
   for (let i = 0; i < turns.length; i++) {
     const turn = turns[i];
     const timestamp = toTimestamp(turn.createdAt);
     switch (turn.role) {
+      case "system": {
+        const text = textPayload(turn);
+        if (text === undefined) break;
+        systemPrompt = text; // last system turn wins
+        break;
+      }
       case "user": {
         const text = textPayload(turn);
         if (text === undefined) break;
@@ -160,5 +180,5 @@ export function transcriptToMessages(turns: TranscriptTurn[], opts: HydrateOptio
         break;
     }
   }
-  return messages;
+  return { messages, systemPrompt };
 }

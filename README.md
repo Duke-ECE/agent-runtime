@@ -51,9 +51,20 @@ model) wins; anything absent falls back to `LLM_API_KEY` / `LLM_BASE_URL` /
 `CreateSession` also accepts an optional `system_prompt` (empty = no system
 prompt — the runtime carries no built-in default; the platform's "Default
 assistant" template lives in the backend's template store, which sends the
-prompt explicitly when one is wanted; applied to fresh and hydrated/resumed
-sessions alike) and an optional `tools` whitelist (empty = all built-ins;
-unknown names are rejected with `INVALID_ARGUMENT`).
+prompt explicitly when one is wanted) and an optional `tools` whitelist
+(empty = all built-ins; unknown names are rejected with `INVALID_ARGUMENT`).
+
+The session's system prompt is persisted in the durable transcript as
+`role: "system"` messages (content_json `{"content": "<prompt>"}`, the same
+shape as user turns): a session whose current prompt is non-empty records it in
+the next `AppendTurn` whenever it differs from the last system message already
+recorded, placed before the turn's other messages. On resume, prompt precedence
+is request `system_prompt` (non-empty) > the transcript's last system message >
+none — so a live template's current value wins, while a session whose template
+was deleted keeps its persona from the transcript. Hydration seeds the
+"last recorded" marker from the transcript's last system message, so an
+unchanged prompt is not re-recorded; system turns never become pi conversation
+messages (the last one wins, malformed ones are skipped with a warning).
 
 ## Tools
 

@@ -16,6 +16,18 @@ interface RuntimeSession {
   llm: SessionLlmConfig;
   /** True until the first completed Chat turn has been offered a generated title. */
   titlePending: boolean;
+  /**
+   * The system prompt the live agent runs with: the CreateSession request's
+   * system_prompt when non-empty, else the transcript's last recorded system
+   * message, else "" (none). Also what AppendTurn considers "current".
+   */
+  systemPrompt: string;
+  /**
+   * Last system prompt recorded in the durable transcript. Seeded from the
+   * transcript's last system message during hydration so an unchanged prompt
+   * is not re-recorded; undefined when nothing has been recorded yet.
+   */
+  lastRecordedSystemPrompt?: string;
 }
 
 function resolveProtoPath(): string {
@@ -138,20 +150,29 @@ export function createRuntime(
         // the agent is constructed so it can seed initialState.messages.
         // Fail-open: any problem leaves the session with empty history.
         let history: AgentMessage[] | undefined;
+        let transcriptSystemPrompt = "";
         if (session_id && sessionClient) {
           try {
             const turns = await sessionClient.getTranscript(session_id);
             if (turns && turns.length > 0) {
-              const messages = transcriptToMessages(turns, { api: model.api, provider: model.provider, model: model.id });
-              if (messages.length > 0) {
-                history = messages;
-                console.log(`hydrated session ${session_id} with ${messages.length} messages from transcript`);
+              const hydrated = transcriptToMessages(turns, { api: model.api, provider: model.provider, model: model.id });
+              transcriptSystemPrompt = hydrated.systemPrompt;
+              if (hydrated.messages.length > 0) {
+                history = hydrated.messages;
+                console.log(`hydrated session ${session_id} with ${hydrated.messages.length} messages from transcript`);
               }
             }
           } catch (err) {
             console.warn(`hydration failed for ${session_id}, starting with empty history:`, err);
           }
         }
+        // System prompt precedence: a non-empty request system_prompt wins
+        // (live template's current value); otherwise the transcript's last
+        // recorded system message takes over (template deleted since); an
+        // empty transcript means no system prompt. The runtime carries no
+        // built-in default (pi-ai omits the system message for a falsy value).
+        // Same code path for fresh and hydrated (resumed) sessions.
+        const systemPrompt = system_prompt || transcriptSystemPrompt;
         const session = sessions.create(
           user_id,
           (sessionId) => ({
@@ -159,15 +180,13 @@ export function createRuntime(
             // Only a session that began empty gets an auto title after its
             // first completed turn; hydrated/history-seeded sessions don't.
             titlePending: !history,
+            systemPrompt,
+            // Seed the "last recorded" marker from the transcript so an
+            // unchanged prompt is not re-recorded on the next AppendTurn.
+            lastRecordedSystemPrompt: transcriptSystemPrompt || undefined,
             agent: new Agent({
               initialState: {
-                // The runtime carries no built-in default system prompt: the
-                // platform's "Default assistant" template lives in the
-                // template store, and the backend sends the prompt explicitly
-                // when one is wanted. Empty/absent system_prompt = no system
-                // prompt (pi-ai omits the system message for a falsy value).
-                // Same code path for fresh and hydrated (resumed) sessions.
-                systemPrompt: system_prompt || "",
+                systemPrompt,
                 model,
                 tools: sessionTools,
                 ...(history ? { messages: history } : {}),
@@ -305,9 +324,21 @@ export function createRuntime(
           if (!turnFailed && !call.cancelled) {
             call.write({ done: { input_tokens: inputTokens, output_tokens: outputTokens } });
             const now = new Date();
-            const turn: TurnMessageInput[] = [
-              { role: "user", contentJson: JSON.stringify({ content: content ?? "" }), createdAt: now },
-            ];
+            const turn: TurnMessageInput[] = [];
+            // Persist the session's current system prompt as a transcript
+            // "system" message whenever it differs from the last one recorded
+            // (first turn of a fresh session, or a changed prompt after a
+            // resume). AppendTurn is fire-and-log, so the marker is updated
+            // optimistically. An empty prompt is never recorded.
+            if (session.agent.systemPrompt && session.agent.systemPrompt !== session.agent.lastRecordedSystemPrompt) {
+              turn.push({
+                role: "system",
+                contentJson: JSON.stringify({ content: session.agent.systemPrompt }),
+                createdAt: now,
+              });
+              session.agent.lastRecordedSystemPrompt = session.agent.systemPrompt;
+            }
+            turn.push({ role: "user", contentJson: JSON.stringify({ content: content ?? "" }), createdAt: now });
             if (assistantText) {
               turn.push({ role: "assistant", contentJson: JSON.stringify({ content: assistantText }), createdAt: now });
             }
