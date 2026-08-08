@@ -118,6 +118,22 @@ export function extractTranscriptLlm(turns: TranscriptTurn[]): TranscriptLlm | u
   return llm;
 }
 
+/**
+ * Extract the session's persisted system prompt from raw transcript turns —
+ * the LAST valid "system" turn wins; "" when the transcript records none.
+ * Used alongside extractTranscriptLlm for marker recovery when a windowed
+ * hydration skipped the transcript's head (where these markers usually sit).
+ */
+export function extractTranscriptSystemPrompt(turns: TranscriptTurn[]): string {
+  let prompt = "";
+  for (const turn of turns) {
+    if (turn.role !== "system") continue;
+    const text = textPayload(turn);
+    if (text !== undefined) prompt = text;
+  }
+  return prompt;
+}
+
 function parseArguments(raw: unknown, seq: number, name: string): Record<string, unknown> {
   if (typeof raw === "string" && raw.length > 0) {
     try {

@@ -42,12 +42,13 @@ resume cost stays bounded as sessions grow. When the response's `has_more` is
 true (older history exists before the window) the runtime logs that earlier
 history was skipped. A window that opens mid-tool-pair hydrates cleanly — the
 orphan `tool_result` at the window's start is skipped like any other
-unpairable entry. One tradeoff: the system-prompt fallback lives in the
-transcript's LAST `system` turn, so if the window contains no system turn the
-fallback is simply absent (empty), the same as resuming a prompt-less
-session. This only affects sessions whose template was deleted AND whose
-transcript outgrew the window — a live template's request `system_prompt`
-always wins over the transcript.
+unpairable entry. The `system`/`config` markers usually sit at the
+transcript's head, so a truncated window may contain none: in that case the
+runtime makes one extra **full-transcript fetch used only to extract the
+markers** (frozen LLM triple + persisted system prompt) — the conversation
+context still comes from the window alone. Without this, long sessions would
+silently lose the frozen-LLM guarantee (the request llm would take over and
+the session could switch models) and the deleted-template prompt fallback.
 
 Auto session titles: after the **first completed Chat turn** of a session that
 began empty (not hydrated, no seeded history), the runtime makes one detached

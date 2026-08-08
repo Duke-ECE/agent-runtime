@@ -4,7 +4,7 @@ import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { loadConfig, type ServiceConfig } from "./config.js";
-import { extractTranscriptLlm, transcriptToMessages } from "./hydrate.js";
+import { extractTranscriptLlm, extractTranscriptSystemPrompt, transcriptToMessages } from "./hydrate.js";
 import { createModel, createStreamFn, type SessionLlmConfig } from "./llm.js";
 import { createSessionClient, type TranscriptTurn, type TurnMessageInput } from "./session-client.js";
 import { SessionManager, assertOwner, grpcError } from "./session-manager.js";
@@ -165,14 +165,9 @@ export function createRuntime(
             // cost stays bounded as sessions grow. transcriptToMessages needs
             // no changes — its existing leniency already skips an orphan
             // tool_result at the window's start or a dangling tool_call at
-            // its end. Tradeoff: the system-prompt and frozen-LLM fallbacks
-            // live in the transcript's LAST system/config turn, so when the
-            // window contains no such turn the fallback is simply absent —
-            // the same as resuming a prompt-less, pre-config-turn session.
-            // For the prompt that only affects sessions whose template was
-            // deleted AND whose transcript outgrew the window; a live
-            // template's request system_prompt always wins (the frozen LLM
-            // triple needs no request winner — see below).
+            // its end. The system-prompt and frozen-LLM markers usually sit
+            // at the transcript's HEAD, so a truncated window may contain
+            // none — recovered below by a markers-only full fetch.
             const transcript = await sessionClient.getTranscript(session_id, {
               limit: config.hydrationMaxTurns,
               beforeSeq: 0,
@@ -185,6 +180,33 @@ export function createRuntime(
             console.warn(`hydration failed for ${session_id}, starting with empty history:`, err);
           }
         }
+        // Marker recovery: system/config turns are written at the head of
+        // the transcript (and only when they change), so a long session's
+        // window may contain none — which would silently drop the frozen-LLM
+        // guarantee (the request llm would take over and the session could
+        // switch models) and the deleted-template prompt fallback. When the
+        // window is truncated and a marker is missing, fetch the full
+        // transcript once and extract ONLY the markers from it; the
+        // conversation context stays limited to the window. Fail-open like
+        // the windowed fetch.
+        let markerTurns = transcriptTurns;
+        if (transcriptTurns && transcriptHasMore && sessionClient && session_id) {
+          const windowHasConfig = extractTranscriptLlm(transcriptTurns) !== undefined;
+          const windowHasSystem = transcriptTurns.some((t) => t.role === "system");
+          if (!windowHasConfig || !windowHasSystem) {
+            try {
+              const full = await sessionClient.getTranscript(session_id); // limit 0 = full
+              if (full && full.messages.length > 0) {
+                markerTurns = full.messages;
+                console.log(
+                  `hydration for session ${session_id}: recovered system/config markers from beyond the window`,
+                );
+              }
+            } catch (err) {
+              console.warn(`marker recovery failed for ${session_id}, using window markers only:`, err);
+            }
+          }
+        }
         // LLM precedence — deliberately ASYMMETRIC vs the system prompt
         // below: the transcript's frozen config turn WINS over the request
         // llm (snapshot semantics: once a session starts, its model must
@@ -195,23 +217,24 @@ export function createRuntime(
         // the fallback for pre-config-turn transcripts and fresh sessions.
         // A config turn with an empty api_key does NOT take over — it merely
         // records that no key was resolved at the time.
-        const frozenLlm = transcriptTurns ? extractTranscriptLlm(transcriptTurns) : undefined;
+        const frozenLlm = markerTurns ? extractTranscriptLlm(markerTurns) : undefined;
         const resolved: SessionLlmConfig =
           frozenLlm && frozenLlm.api_key
             ? { apiKey: frozenLlm.api_key, baseUrl: frozenLlm.base_url, model: frozenLlm.model }
             : resolveLlm(llm);
         const model = createModel(resolved);
-        // Convert the fetched transcript into pi messages, stamped with the
-        // resolved model's identity, so it can seed initialState.messages.
+        // Convert the fetched transcript WINDOW into pi messages, stamped
+        // with the resolved model's identity, so it can seed
+        // initialState.messages. The system-prompt marker comes from
+        // markerTurns (the window, or the recovered full transcript).
         let history: AgentMessage[] | undefined;
-        let transcriptSystemPrompt = "";
+        let transcriptSystemPrompt = markerTurns ? extractTranscriptSystemPrompt(markerTurns) : "";
         if (transcriptTurns) {
           const hydrated = transcriptToMessages(transcriptTurns, {
             api: model.api,
             provider: model.provider,
             model: model.id,
           });
-          transcriptSystemPrompt = hydrated.systemPrompt;
           if (hydrated.messages.length > 0) {
             history = hydrated.messages;
             console.log(`hydrated session ${session_id} with ${hydrated.messages.length} messages from transcript`);

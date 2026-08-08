@@ -42,6 +42,9 @@ interface TranscriptRequest {
 
 async function startFakeSessionManager(opts: {
   transcript?: TranscriptMessage[];
+  // Served for full-transcript (limit = 0) recovery fetches; defaults to
+  // `transcript`. Lets a test put markers beyond the windowed page.
+  fullTranscript?: TranscriptMessage[];
   transcriptError?: grpc.status;
   hasMore?: boolean;
 }): Promise<{
@@ -72,7 +75,11 @@ async function startFakeSessionManager(opts: {
         callback(Object.assign(new Error("transcript unavailable"), { code: opts.transcriptError }), null);
         return;
       }
-      callback(null, { messages: opts.transcript ?? [], has_more: opts.hasMore ?? false });
+      const isFullFetch = !call.request.limit;
+      callback(null, {
+        messages: (isFullFetch ? (opts.fullTranscript ?? opts.transcript) : opts.transcript) ?? [],
+        has_more: isFullFetch ? false : (opts.hasMore ?? false),
+      });
     },
   });
   const port = await new Promise<number>((resolve, reject) => {
@@ -383,4 +390,71 @@ test("system fallback works when a system turn is inside the window", async (t) 
     state.messages.map((m: { role: string }) => m.role),
     ["user", "assistant"],
   );
+});
+
+test("markers beyond the window are recovered via a full-transcript fetch", async (t) => {
+  const sessionManager = await startFakeSessionManager({
+    // The window (latest 2): no system/config turns.
+    transcript: [
+      transcriptMessage(50, "user", { content: "latest question" }),
+      transcriptMessage(51, "assistant", { content: "latest answer" }),
+    ],
+    // The full transcript: the frozen LLM and the persona sit at the head.
+    fullTranscript: [
+      transcriptMessage(1, "system", { content: "head persona" }),
+      transcriptMessage(2, "config", {
+        llm: { api_key: "frozen-key", base_url: "https://frozen.example/v1", model: "frozen-model" },
+      }),
+      transcriptMessage(3, "user", { content: "old question" }),
+      transcriptMessage(4, "assistant", { content: "old answer" }),
+      transcriptMessage(50, "user", { content: "latest question" }),
+      transcriptMessage(51, "assistant", { content: "latest answer" }),
+    ],
+    hasMore: true,
+  });
+  t.after(sessionManager.close);
+  const { runtime, createSession } = await setup(t, sessionManager.addr);
+
+  const created = await createSession({
+    user_id: "alice",
+    session_id: "sess-marker-recovery",
+    // A request llm that must LOSE to the recovered frozen triple.
+    llm: { api_key: "request-key", base_url: "https://request.example/v1", model: "request-model" },
+  });
+  const sess = runtime.sessions.get(created.session_id).agent;
+  assert.deepEqual(sess.llm, {
+    apiKey: "frozen-key",
+    baseUrl: "https://frozen.example/v1",
+    model: "frozen-model",
+  });
+  const state = sess.agent.state;
+  assert.equal(state.systemPrompt, "head persona");
+  // The conversation context still comes from the window only.
+  assert.deepEqual(
+    state.messages.map((m: { role: string }) => m.role),
+    ["user", "assistant"],
+  );
+  // Two fetches: the window, then the full recovery fetch (limit unset).
+  assert.equal(sessionManager.transcriptRequests.length, 2);
+  assert.ok(!sessionManager.transcriptRequests[1].limit);
+});
+
+test("no recovery fetch when the window already carries both markers", async (t) => {
+  const sessionManager = await startFakeSessionManager({
+    transcript: [
+      transcriptMessage(40, "system", { content: "windowed persona" }),
+      transcriptMessage(41, "config", {
+        llm: { api_key: "frozen-key", base_url: "https://frozen.example/v1", model: "frozen-model" },
+      }),
+      transcriptMessage(42, "user", { content: "hi" }),
+      transcriptMessage(43, "assistant", { content: "hello" }),
+    ],
+    hasMore: true,
+  });
+  t.after(sessionManager.close);
+  const { runtime, createSession } = await setup(t, sessionManager.addr);
+
+  const created = await createSession({ user_id: "alice", session_id: "sess-markers-in-window" });
+  assert.equal(runtime.sessions.get(created.session_id).agent.llm.apiKey, "frozen-key");
+  assert.equal(sessionManager.transcriptRequests.length, 1);
 });
