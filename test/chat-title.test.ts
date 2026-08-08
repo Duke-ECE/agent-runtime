@@ -163,6 +163,7 @@ async function setup(
     llm: { apiKey: "test-key", baseUrl: llm.url, model: "test-model" },
     sessionManagerAddr: sessionManager.addr,
     serviceToken: "test-token",
+    hydrationMaxTurns: 50,
   };
   const { server } = createRuntime(config, undefined, opts.runtimeOptions);
   const port = await new Promise<number>((resolve, reject) => {

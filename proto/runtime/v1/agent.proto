@@ -18,7 +18,9 @@ message CreateSessionRequest {
   LlmConfig llm = 2;   // optional; server falls back to env config if absent
   string session_id = 3;  // optional; when set (by the session-manager), the
                           // server adopts it instead of generating one
-  string system_prompt = 4;  // optional; empty = server built-in default
+  string system_prompt = 4;  // optional; empty = no system prompt (the
+                             // platform's default lives in the template
+                             // store, not in this server)
   repeated string tools = 5;  // optional; empty = all built-in tools
                               // (read, write, bash, edit); unknown names are
                               // rejected with INVALID_ARGUMENT

@@ -15,6 +15,7 @@ service SessionService {
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
+  rpc DeleteSession(DeleteSessionRequest) returns (DeleteSessionResponse);
   rpc AppendTurn(AppendTurnRequest) returns (AppendTurnResponse);
   rpc GetTranscript(GetTranscriptRequest) returns (GetTranscriptResponse);
   rpc SetTitle(SetTitleRequest) returns (SetTitleResponse);
@@ -41,10 +42,13 @@ message GetSessionResponse {
 
 message ListSessionsRequest {
   string user_id = 1;  // required; only this user's sessions are returned
+  int32 limit = 2;   // 0 = server default (50); capped (200)
+  int32 offset = 3;  // 0 = first page; ordered by last_active desc
 }
 
 message ListSessionsResponse {
   repeated Session sessions = 1;
+  bool has_more = 2;  // true when another page exists after this one
 }
 
 message EndSessionRequest {
@@ -53,6 +57,15 @@ message EndSessionRequest {
 }
 
 message EndSessionResponse {}
+
+// DeleteSession permanently removes a session and its entire transcript.
+// Ownership enforced. Deleting is allowed in any status; it is irreversible.
+message DeleteSessionRequest {
+  string session_id = 1;
+  string user_id = 2;  // ownership enforced
+}
+
+message DeleteSessionResponse {}
 
 // AppendTurn is the runtime's write-through after a completed Chat turn.
 // Trusted callers only (service token), so no ownership check against
@@ -65,24 +78,34 @@ message AppendTurnRequest {
 
 message AppendTurnResponse {}
 
-// GetTranscript returns the full ordered transcript. Allowed for the session
-// owner (user_id matches) or for a service-token caller (runtime hydration).
+// GetTranscript returns the transcript. Allowed for the session owner
+// (user_id matches) or for a service-token caller (runtime hydration).
+// Pagination: with limit > 0 the server returns the latest window — the up
+// to `limit` messages with seq < before_seq (before_seq = 0 means "from the
+// end"), in ascending seq order; has_more is true when older messages exist
+// before the window. With limit = 0 the full transcript is returned
+// (legacy behavior, has_more always false).
 message GetTranscriptRequest {
   string session_id = 1;
   string user_id = 2;
+  int32 limit = 3;      // 0 = full transcript; capped (1000)
+  int32 before_seq = 4; // 0 = start from the latest messages
 }
 
 message GetTranscriptResponse {
   repeated TurnMessage messages = 1;  // ordered by seq
+  bool has_more = 2;  // true when older messages exist before this window
 }
 
 // SetTitle sets the session's display title (e.g. an LLM-generated summary
-// of the first turn). Runtime-internal: service token required; setting a
-// title on an ended session is allowed (titles are editable metadata, not
+// of the first turn, or a user rename). Allowed for the session owner
+// (user_id matches) or a service-token caller (runtime auto-titles); setting
+// a title on an ended session is allowed (titles are editable metadata, not
 // transcript content).
 message SetTitleRequest {
   string session_id = 1;
   string title = 2;  // empty title is rejected
+  string user_id = 3;  // owner path; when empty, the service token decides
 }
 
 message SetTitleResponse {
@@ -103,7 +126,9 @@ message Session {
 
 message TurnMessage {
   int32 seq = 1;
-  string role = 2;  // "user" | "assistant" | "tool_call" | "tool_result"
+  string role = 2;  // "user" | "assistant" | "tool_call" | "tool_result" |
+                    // "system" (the session's persisted system prompt;
+                    // re-recorded when it changes, never a chat message)
   string content_json = 3;  // role-specific payload, JSON-encoded
   string created_at = 4;  // RFC 3339
 }

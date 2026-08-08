@@ -153,13 +153,37 @@ export function createRuntime(
         let transcriptSystemPrompt = "";
         if (session_id && sessionClient) {
           try {
-            const turns = await sessionClient.getTranscript(session_id);
-            if (turns && turns.length > 0) {
-              const hydrated = transcriptToMessages(turns, { api: model.api, provider: model.provider, model: model.id });
+            // Windowed hydration: fetch only the latest HYDRATION_MAX_TURNS
+            // transcript messages (before_seq 0 = "from the end") so resume
+            // cost stays bounded as sessions grow. transcriptToMessages needs
+            // no changes — its existing leniency already skips an orphan
+            // tool_result at the window's start or a dangling tool_call at
+            // its end. Tradeoff: the system-prompt fallback lives in the
+            // transcript's LAST system turn, so when the window contains no
+            // system turn the fallback is simply absent (empty) — the same as
+            // resuming a prompt-less session. That only affects sessions
+            // whose template was deleted AND whose transcript outgrew the
+            // window; a live template's request system_prompt always wins.
+            const transcript = await sessionClient.getTranscript(session_id, {
+              limit: config.hydrationMaxTurns,
+              beforeSeq: 0,
+            });
+            if (transcript && transcript.messages.length > 0) {
+              const hydrated = transcriptToMessages(transcript.messages, {
+                api: model.api,
+                provider: model.provider,
+                model: model.id,
+              });
               transcriptSystemPrompt = hydrated.systemPrompt;
               if (hydrated.messages.length > 0) {
                 history = hydrated.messages;
                 console.log(`hydrated session ${session_id} with ${hydrated.messages.length} messages from transcript`);
+              }
+              if (transcript.hasMore) {
+                console.log(
+                  `hydration for session ${session_id}: earlier transcript history skipped ` +
+                    `(window limited to the latest ${config.hydrationMaxTurns} messages)`,
+                );
               }
             }
           } catch (err) {
@@ -340,7 +364,17 @@ export function createRuntime(
             }
             turn.push({ role: "user", contentJson: JSON.stringify({ content: content ?? "" }), createdAt: now });
             if (assistantText) {
-              turn.push({ role: "assistant", contentJson: JSON.stringify({ content: assistantText }), createdAt: now });
+              // Persist the turn's token usage (the same counts sent in the
+              // SSE done frame) next to the assistant text so the console can
+              // show historical usage; the key is omitted when the provider
+              // reported none.
+              const payload: { content: string; usage?: { input_tokens: number; output_tokens: number } } = {
+                content: assistantText,
+              };
+              if (inputTokens > 0 || outputTokens > 0) {
+                payload.usage = { input_tokens: inputTokens, output_tokens: outputTokens };
+              }
+              turn.push({ role: "assistant", contentJson: JSON.stringify(payload), createdAt: now });
             }
             turn.push(...toolMessages);
             sessionClient?.appendTurn(session.id, session.userId, turn);

@@ -172,3 +172,14 @@ test("a transcript without system turns yields an empty systemPrompt", () => {
   assert.equal(result.systemPrompt, "");
   assert.equal(result.messages.length, 1);
 });
+
+test("assistant turns carrying a persisted usage payload hydrate, the extra key ignored", () => {
+  const { messages } = transcriptToMessages(
+    [turn(1, "assistant", { content: "hello", usage: { input_tokens: 3, output_tokens: 2 } })],
+    OPTS,
+  );
+  assert.equal(messages.length, 1);
+  const assistant = messages[0] as AssistantMessage;
+  assert.deepEqual(assistant.content, [{ type: "text", text: "hello" }]);
+  assert.deepEqual(assistant.usage, ZERO_USAGE);
+});

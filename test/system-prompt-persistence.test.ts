@@ -148,6 +148,7 @@ async function setup(
     llm: { apiKey: "test-key", baseUrl: llm.url, model: "test-model" },
     sessionManagerAddr: sessionManager.addr,
     serviceToken: "test-token",
+    hydrationMaxTurns: 50,
   };
   // Stub the title generator so fresh-session titles don't consume scripted
   // LLM replies or interleave with the chat requests under test.

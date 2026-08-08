@@ -20,6 +20,7 @@ const TEST_CONFIG: ServiceConfig = {
   maxSessions: 20,
   sessionTtlMinutes: 30,
   llm: { apiKey: undefined, baseUrl: "http://127.0.0.1:1/v1", model: "test-model" },
+  hydrationMaxTurns: 50,
 };
 
 interface TestClient {

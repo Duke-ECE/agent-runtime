@@ -9,7 +9,7 @@ OpenAI-compatible LLM endpoint.
 
 Implements `runtime.v1.AgentService` from the
 [Duke-ECE/protos](https://github.com/Duke-ECE/protos) repo
-(`proto/runtime/v1/agent.proto`, pinned to tag `v0.6.0`). The proto is loaded
+(`proto/runtime/v1/agent.proto`, pinned to tag `v0.7.0`). The proto is loaded
 at runtime with `@grpc/grpc-js` + `@grpc/proto-loader` — no codegen.
 
 Methods: `CreateSession`, `EndSession`, `ListSessions`, `Chat` (server-streaming:
@@ -35,6 +35,19 @@ then arrives with a caller-provided `session_id` that is not live in memory
 `session.v1.GetTranscript` (token-only, `x-service-token` metadata) and seeds
 the new agent's history with it. Hydration is fail-open: any error starts the
 session with empty history.
+
+Hydration is **windowed**: only the latest `HYDRATION_MAX_TURNS` transcript
+messages are requested (`limit=HYDRATION_MAX_TURNS`, `before_seq=0`), so
+resume cost stays bounded as sessions grow. When the response's `has_more` is
+true (older history exists before the window) the runtime logs that earlier
+history was skipped. A window that opens mid-tool-pair hydrates cleanly — the
+orphan `tool_result` at the window's start is skipped like any other
+unpairable entry. One tradeoff: the system-prompt fallback lives in the
+transcript's LAST `system` turn, so if the window contains no system turn the
+fallback is simply absent (empty), the same as resuming a prompt-less
+session. This only affects sessions whose template was deleted AND whose
+transcript outgrew the window — a live template's request `system_prompt`
+always wins over the transcript.
 
 Auto session titles: after the **first completed Chat turn** of a session that
 began empty (not hydrated, no seeded history), the runtime makes one detached
@@ -66,6 +79,13 @@ was deleted keeps its persona from the transcript. Hydration seeds the
 unchanged prompt is not re-recorded; system turns never become pi conversation
 messages (the last one wins, malformed ones are skipped with a warning).
 
+Assistant transcript messages also carry the turn's token usage: content_json
+is `{"content": "...", "usage": {"input_tokens": N, "output_tokens": M}}`
+(JSON numbers, the same counts sent in the Chat `done` event; the `usage` key
+is omitted when the provider reported none). The frontend reads it to show
+historical usage. User, system, and tool messages keep their plain shapes.
+Hydration ignores the extra key (hydrated assistant messages get zero usage).
+
 ## Tools
 
 The agent exposes `read` / `write` / `bash` / `edit` tools (schemas modeled on
@@ -82,6 +102,7 @@ plugs into `ToolExecutor` later.
 | `PORT`                | `50052`                       | gRPC listen port                              |
 | `MAX_SESSIONS`        | `20`                          | Max concurrent sessions (`RESOURCE_EXHAUSTED`)|
 | `SESSION_TTL_MINUTES` | `30`                          | Idle session TTL; reaper runs every minute    |
+| `HYDRATION_MAX_TURNS` | `50`                          | Transcript window fetched on session resume   |
 | `LLM_API_KEY`         | _(none)_                      | Fallback API key when `CreateSession.llm` omits it |
 | `LLM_BASE_URL`        | `https://api.openai.com/v1`   | Fallback OpenAI-compatible base URL           |
 | `LLM_MODEL`           | `gpt-4o-mini`                 | Fallback model id                             |

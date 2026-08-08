@@ -164,6 +164,7 @@ async function setup(
     llm: { apiKey: "test-key", baseUrl: llm.url, model: "test-model" },
     sessionManagerAddr: sessionManager?.addr,
     serviceToken: opts.withSessionManager ? "test-token" : undefined,
+    hydrationMaxTurns: 50,
   };
   const { server } = createRuntime(config);
   const port = await new Promise<number>((resolve, reject) => {
@@ -230,7 +231,8 @@ test("successful chat turn is written through to session-manager once", async (t
   );
   assert.deepEqual(
     append.messages.map((m) => JSON.parse(m.content_json)),
-    [{ content: "hi" }, { content: "Hello world" }],
+    // The assistant message carries the same token counts as the done frame.
+    [{ content: "hi" }, { content: "Hello world", usage: { input_tokens: 3, output_tokens: 2 } }],
   );
   for (const m of append.messages) {
     assert.equal(m.seq, 0); // assigned server-side
@@ -264,6 +266,18 @@ test("tool events are recorded as tool_call/tool_result messages", async (t) => 
     output: "",
     error: SANDBOX_NOT_CONNECTED,
   });
+});
+
+test("assistant content_json omits usage when the provider reported no token counts", async (t) => {
+  // Stream without a usage chunk: pi-ai reports no usage, counts stay zero.
+  const noUsageReply: LlmReply = { sse: sse(chunk({ role: "assistant", content: "no meters" }), chunk({}, "stop")) };
+  const { chat, sessionId, appends } = await setup(t, () => noUsageReply, { withSessionManager: true });
+
+  await chat({ session_id: sessionId, content: "hi", user_id: "alice" });
+  await waitFor(() => appends.length === 1);
+  const assistant = appends[0].messages.find((m) => m.role === "assistant");
+  assert.ok(assistant, "expected an assistant message");
+  assert.deepEqual(JSON.parse(assistant.content_json), { content: "no meters" });
 });
 
 test("failed turn is not written through", async (t) => {

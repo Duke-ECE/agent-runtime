@@ -13,6 +13,8 @@ export interface ServiceConfig {
   sessionManagerAddr?: string;
   /** Shared service token sent as x-service-token metadata to session-manager. */
   serviceToken?: string;
+  /** Max transcript messages fetched when hydrating a session on resume. */
+  hydrationMaxTurns: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig {
@@ -27,5 +29,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
     },
     sessionManagerAddr: env.SESSION_MANAGER_ADDR || undefined,
     serviceToken: env.SERVICE_TOKEN || undefined,
+    hydrationMaxTurns: Number(env.HYDRATION_MAX_TURNS ?? 50),
   };
 }

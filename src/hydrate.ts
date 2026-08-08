@@ -3,8 +3,10 @@ import type { AssistantMessage, ToolResultMessage, Usage, UserMessage } from "@e
 import type { TranscriptTurn } from "./session-client.js";
 
 /**
- * Zero token usage stamped on hydrated assistant messages: real usage is not
- * persisted in the durable transcript, and pi-ai requires a Usage object.
+ * Zero token usage stamped on hydrated assistant messages. Assistant
+ * content_json may carry an optional persisted `usage` object
+ * (`{"input_tokens": N, "output_tokens": M}`), but hydration ignores it —
+ * pi-ai requires a Usage object, so hydrated messages get zero usage.
  */
 export const ZERO_USAGE: Usage = {
   input: 0,
@@ -86,7 +88,10 @@ function parseArguments(raw: unknown, seq: number, name: string): Record<string,
  * `hydrated-<seq>` id. System turns (role "system", same `{"content": ...}`
  * shape as user turns) are collected into the result's `systemPrompt` — last
  * one wins — and never become pi messages. Unknown roles and malformed entries
- * are skipped with a warning — this function never throws.
+ * are skipped with a warning — this function never throws. Payload keys
+ * beyond `content` (e.g. the optional `usage` object on assistant turns) are
+ * ignored, so a windowed transcript that starts mid-tool-pair hydrates
+ * cleanly too (the orphan tool_result is skipped like any other).
  */
 export function transcriptToMessages(turns: TranscriptTurn[], opts: HydrateOptions): HydrationResult {
   const messages: AgentMessage[] = [];

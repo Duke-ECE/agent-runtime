@@ -35,12 +35,15 @@ interface TranscriptMessage {
 
 interface TranscriptRequest {
   session_id: string;
+  limit?: number;
+  before_seq?: number;
   token?: string;
 }
 
 async function startFakeSessionManager(opts: {
   transcript?: TranscriptMessage[];
   transcriptError?: grpc.status;
+  hasMore?: boolean;
 }): Promise<{
   addr: string;
   transcriptRequests: TranscriptRequest[];
@@ -61,13 +64,15 @@ async function startFakeSessionManager(opts: {
       const token = call.metadata.get("x-service-token")[0];
       transcriptRequests.push({
         session_id: call.request.session_id,
+        limit: call.request.limit,
+        before_seq: call.request.before_seq,
         token: typeof token === "string" ? token : undefined,
       });
       if (opts.transcriptError !== undefined) {
         callback(Object.assign(new Error("transcript unavailable"), { code: opts.transcriptError }), null);
         return;
       }
-      callback(null, { messages: opts.transcript ?? [] });
+      callback(null, { messages: opts.transcript ?? [], has_more: opts.hasMore ?? false });
     },
   });
   const port = await new Promise<number>((resolve, reject) => {
@@ -87,6 +92,7 @@ async function startFakeSessionManager(opts: {
 async function setup(
   t: import("node:test").TestContext,
   sessionManagerAddr: string,
+  configOverrides: Partial<ServiceConfig> = {},
 ): Promise<{
   runtime: Runtime;
   createSession: (req: unknown) => Promise<{ session_id: string }>;
@@ -98,6 +104,8 @@ async function setup(
     llm: { apiKey: "test-key", baseUrl: "http://127.0.0.1:1/v1", model: "test-model" },
     sessionManagerAddr,
     serviceToken: "test-token",
+    hydrationMaxTurns: 50,
+    ...configOverrides,
   };
   const runtime = createRuntime(config);
   const port = await new Promise<number>((resolve, reject) => {
@@ -143,7 +151,9 @@ test("CreateSession hydrates the agent from a durable transcript", async (t) => 
   const created = await createSession({ user_id: "alice", session_id: "sess-hydrated" });
   assert.equal(created.session_id, "sess-hydrated");
 
-  assert.deepEqual(sessionManager.transcriptRequests, [{ session_id: "sess-hydrated", token: "test-token" }]);
+  assert.deepEqual(sessionManager.transcriptRequests, [
+    { session_id: "sess-hydrated", limit: 50, before_seq: 0, token: "test-token" },
+  ]);
 
   const messages = runtime.sessions.get("sess-hydrated").agent.agent.state.messages as any[];
   assert.deepEqual(
@@ -284,4 +294,93 @@ test("CreateSession on resume: no request prompt and no transcript system messag
 
   const created = await createSession({ user_id: "alice", session_id: "sess-no-prompt" });
   assert.equal(runtime.sessions.get(created.session_id).agent.agent.state.systemPrompt, "");
+});
+
+test("hydration requests only the latest HYDRATION_MAX_TURNS window", async (t) => {
+  const sessionManager = await startFakeSessionManager({
+    transcript: [transcriptMessage(1, "user", { content: "hi" })],
+  });
+  t.after(sessionManager.close);
+  const { createSession } = await setup(t, sessionManager.addr, { hydrationMaxTurns: 7 });
+
+  await createSession({ user_id: "alice", session_id: "sess-windowed" });
+  assert.deepEqual(sessionManager.transcriptRequests, [
+    { session_id: "sess-windowed", limit: 7, before_seq: 0, token: "test-token" },
+  ]);
+});
+
+test("hydration with has_more hydrates the window and logs the skipped earlier history", async (t) => {
+  const sessionManager = await startFakeSessionManager({
+    transcript: [
+      transcriptMessage(41, "user", { content: "latest question" }),
+      transcriptMessage(42, "assistant", { content: "latest answer" }),
+    ],
+    hasMore: true,
+  });
+  t.after(sessionManager.close);
+  const logs: string[] = [];
+  const originalLog = console.log;
+  console.log = (...args: unknown[]) => {
+    logs.push(args.map(String).join(" "));
+  };
+  t.after(() => {
+    console.log = originalLog;
+  });
+  const { runtime, createSession } = await setup(t, sessionManager.addr);
+
+  const created = await createSession({ user_id: "alice", session_id: "sess-has-more" });
+  const messages = runtime.sessions.get(created.session_id).agent.agent.state.messages as any[];
+  assert.deepEqual(
+    messages.map((m) => m.role),
+    ["user", "assistant"],
+  );
+  assert.ok(
+    logs.some((line) => line.includes("earlier transcript history skipped") && line.includes("sess-has-more")),
+    `expected a skip log line, got: ${JSON.stringify(logs)}`,
+  );
+});
+
+test("a window boundary mid-tool-pair hydrates cleanly", async (t) => {
+  const sessionManager = await startFakeSessionManager({
+    // As a latest-window page can look: the window opened between a tool_call
+    // and its result (orphan tool_result first) and closed right after a
+    // tool_call whose result is beyond the transcript end (dangling call).
+    transcript: [
+      transcriptMessage(5, "tool_result", { tool: "bash", ok: true, output: "orphan", error: "" }),
+      transcriptMessage(6, "user", { content: "hi" }),
+      transcriptMessage(7, "assistant", { content: "hello" }),
+      transcriptMessage(8, "tool_call", { tool: "bash", arguments_json: "{}" }),
+    ],
+    hasMore: true,
+  });
+  t.after(sessionManager.close);
+  const { runtime, createSession } = await setup(t, sessionManager.addr);
+
+  const created = await createSession({ user_id: "alice", session_id: "sess-mid-pair" });
+  const messages = runtime.sessions.get(created.session_id).agent.agent.state.messages as any[];
+  assert.deepEqual(
+    messages.map((m) => m.role),
+    ["user", "assistant"],
+  );
+});
+
+test("system fallback works when a system turn is inside the window", async (t) => {
+  const sessionManager = await startFakeSessionManager({
+    transcript: [
+      transcriptMessage(38, "system", { content: "windowed persona" }),
+      transcriptMessage(39, "user", { content: "hi" }),
+      transcriptMessage(40, "assistant", { content: "hello" }),
+    ],
+    hasMore: true, // older history (including any older system turns) is out of the window
+  });
+  t.after(sessionManager.close);
+  const { runtime, createSession } = await setup(t, sessionManager.addr);
+
+  const created = await createSession({ user_id: "alice", session_id: "sess-windowed-persona" });
+  const state = runtime.sessions.get(created.session_id).agent.agent.state;
+  assert.equal(state.systemPrompt, "windowed persona");
+  assert.deepEqual(
+    state.messages.map((m: { role: string }) => m.role),
+    ["user", "assistant"],
+  );
 });

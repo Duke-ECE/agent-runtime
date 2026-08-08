@@ -19,6 +19,24 @@ export interface TranscriptTurn {
   createdAt?: string;
 }
 
+/**
+ * Window selector for GetTranscript. Omit (or pass all-zero fields) for the
+ * full transcript — the legacy behavior, kept for callers that need it.
+ */
+export interface TranscriptWindow {
+  /** Max messages to return; 0/undefined = full transcript. */
+  limit?: number;
+  /** Only messages with seq < beforeSeq; 0/undefined = the latest window. */
+  beforeSeq?: number;
+}
+
+/** GetTranscript result: the requested window plus the pagination marker. */
+export interface TranscriptResult {
+  messages: TranscriptTurn[];
+  /** True when older messages exist before the returned window. */
+  hasMore: boolean;
+}
+
 /** Bound on how long CreateSession may wait for a transcript fetch. */
 const GET_TRANSCRIPT_TIMEOUT_MS = 5_000;
 
@@ -32,7 +50,7 @@ const GET_TRANSCRIPT_TIMEOUT_MS = 5_000;
 export interface SessionClient {
   appendTurn(sessionId: string, userId: string, messages: TurnMessageInput[]): void;
   setTitle(sessionId: string, title: string): void;
-  getTranscript(sessionId: string): Promise<TranscriptTurn[] | null>;
+  getTranscript(sessionId: string, window?: TranscriptWindow): Promise<TranscriptResult | null>;
 }
 
 interface SessionServiceClient {
@@ -130,8 +148,10 @@ export function createSessionClient(config: ServiceConfig): SessionClient | unde
 
     // Token-only GetTranscript (no user_id): the service token authorizes the
     // runtime hydration path on session-manager. Fail-open on any error.
-    getTranscript(sessionId) {
-      return new Promise<TranscriptTurn[] | null>((resolve) => {
+    // `window` selects the latest `limit` messages (before_seq 0 = from the
+    // end); omitting it requests the full transcript (limit 0).
+    getTranscript(sessionId, window) {
+      return new Promise<TranscriptResult | null>((resolve) => {
         let serviceClient: SessionServiceClient;
         try {
           serviceClient = getClient();
@@ -143,25 +163,32 @@ export function createSessionClient(config: ServiceConfig): SessionClient | unde
         const metadata = new grpc.Metadata();
         if (config.serviceToken) metadata.set("x-service-token", config.serviceToken);
         const options: grpc.CallOptions = { deadline: Date.now() + GET_TRANSCRIPT_TIMEOUT_MS };
+        const request = {
+          session_id: sessionId,
+          limit: window?.limit ?? 0,
+          before_seq: window?.beforeSeq ?? 0,
+        };
         try {
-          serviceClient.getTranscript({ session_id: sessionId }, metadata, options, (err, res) => {
+          serviceClient.getTranscript(request, metadata, options, (err, res) => {
             if (err) {
               console.warn(`session-manager GetTranscript failed for ${sessionId}: ${err.message}`);
               resolve(null);
               return;
             }
-            const messages =
-              (res as {
-                messages?: Array<{ seq?: number; role?: string; content_json?: string; created_at?: string }>;
-              } | null)?.messages ?? [];
-            resolve(
-              messages.map((m) => ({
+            const body = res as {
+              messages?: Array<{ seq?: number; role?: string; content_json?: string; created_at?: string }>;
+              has_more?: boolean;
+            } | null;
+            const messages = body?.messages ?? [];
+            resolve({
+              messages: messages.map((m) => ({
                 seq: Number(m.seq ?? 0),
                 role: String(m.role ?? ""),
                 contentJson: typeof m.content_json === "string" ? m.content_json : String(m.content_json ?? ""),
                 createdAt: m.created_at || undefined,
               })),
-            );
+              hasMore: body?.has_more === true,
+            });
           });
         } catch (err) {
           console.warn(`session-manager GetTranscript failed for ${sessionId}:`, err);
