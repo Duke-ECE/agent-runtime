@@ -113,3 +113,27 @@ test("a rewritten history is never treated as an unchanged prefix", () => {
   const rewritten = shape([message(9, "hello"), message(10, "world")]);
   assert.equal(estimator.estimate(rewritten), estimateRequestTokens(rewritten));
 });
+
+test("a missing provider usage report leaves the baseline unset", () => {
+  const estimator = new ContextEstimator();
+  const shape = { systemPrompt: "s", tools: [], summary: null, messages: [message(1, "hello")] };
+
+  // The provider omitted usage (or reported zero): the estimator must not
+  // pretend the request was measured, or every later estimate would inherit a
+  // baseline of zero and under-count the context.
+  estimator.recordActualUsage(undefined, shape);
+  assert.equal(estimator.estimate(shape), estimateRequestTokens(shape));
+
+  estimator.recordActualUsage(
+    { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, total_tokens: 0 },
+    shape,
+  );
+  assert.equal(estimator.estimate(shape), estimateRequestTokens(shape));
+
+  // A real report does set one.
+  estimator.recordActualUsage(
+    { input_tokens: 5_000, cached_input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, total_tokens: 5_000 },
+    shape,
+  );
+  assert.equal(estimator.estimate(shape), 5_000);
+});
