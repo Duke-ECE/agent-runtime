@@ -25,6 +25,13 @@ import { DurableExecution } from "./durable-execution.js";
 import { createModel, createStreamFn, type SessionLlmConfig } from "./llm.js";
 import { aggregateUsage, translateAgentEvent, type V2StreamEvent } from "./runtime-events.js";
 import {
+  elapsedMs,
+  jsonLineSink,
+  recordCompaction,
+  recordLeaseConflict,
+  type TelemetrySink,
+} from "./telemetry.js";
+import {
   ContextEstimator,
   DEFAULT_BUDGET,
   providerMessages,
@@ -67,6 +74,8 @@ interface LiveSession {
 export interface DurableRuntimeOptions {
   /** Injectable durable client; defaults to the gRPC client from the config. */
   client?: DurableSessionClient;
+  /** Where structured operational records go; defaults to one JSON line each. */
+  telemetry?: TelemetrySink;
   budget?: Partial<BudgetConfig>;
   /**
    * Builds the model and stream function for a session. Tests inject a scripted
@@ -196,6 +205,7 @@ export function createDurableRuntime(
   const sessions = new Map<string, LiveSession>();
   const modelFactory =
     options.modelFactory ?? ((llm: SessionLlmConfig) => ({ model: createModel(llm), streamFn: createStreamFn(llm) }));
+  const telemetry = options.telemetry ?? jsonLineSink;
 
   if (!client) {
     // SESSION_MANAGER_ADDR unset: v2 has no durable boundary at all, so every
@@ -344,7 +354,10 @@ export function createDurableRuntime(
         userId,
         clientRequestId,
         content,
-        onLeaseLost: () => live.agent.abort(),
+        onLeaseLost: (err) => {
+          recordLeaseConflict(telemetry, { sessionId, requestMessageId: execution?.requestMessageId, reason: err.message });
+          live.agent.abort();
+        },
       });
       const active = execution;
 
@@ -426,6 +439,7 @@ export function createDurableRuntime(
           messages: providerMessages(live.canonical),
         };
         if (!shouldCompact(live.estimator.estimate(shape), live.budget)) return undefined;
+        const startedAt = Date.now();
         try {
           const result = await compact({
             publisher: active,
@@ -445,9 +459,18 @@ export function createDurableRuntime(
           live.lastCheckpoint = result.checkpoint;
           live.canonical = result.cutoff.retained;
           live.estimator.invalidate();
-          console.log(
-            `compacted session ${sessionId}: ${result.checkpoint.estimatedTokensBefore} -> ${result.checkpoint.estimatedTokensAfter} tokens`,
-          );
+          recordCompaction(telemetry, {
+            sessionId,
+            requestMessageId: active.requestMessageId,
+            checkpointId: result.checkpoint.id,
+            coveredThroughSeq: result.checkpoint.coveredThroughSeq,
+            sourceRevision: result.checkpoint.sourceRevision,
+            estimatedTokensBefore: result.checkpoint.estimatedTokensBefore,
+            estimatedTokensAfter: result.checkpoint.estimatedTokensAfter,
+            durationMs: elapsedMs(startedAt),
+            summarizerModel: result.checkpoint.summarizerModel,
+            promptVersion: result.checkpoint.promptVersion,
+          });
           return {
             context: {
               ...hook.context,
