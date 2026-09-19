@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package runtime.v2;
+
+import "session/v2/session.proto";
+
+option go_package = "github.com/Duke-ECE/protos/gen/go/runtime/v2;v2";
+
+// AgentService executes durable requests. Session identity, configuration,
+// canonical messages, and request state are owned by session.v2.SessionService.
+service AgentService {
+  rpc Chat(ChatRequest) returns (stream ChatResponse);
+  rpc CancelRequest(CancelRequestRequest) returns (CancelRequestResponse);
+  rpc EvictSession(EvictSessionRequest) returns (EvictSessionResponse);
+}
+
+message ChatRequest {
+  string session_id = 1;
+  string user_id = 2;
+  string client_request_id = 3;
+  string request_hash = 4;
+  repeated session.v2.ContentBlock content = 5;
+  uint32 format_version = 6;
+}
+
+message CancelRequestRequest {
+  string session_id = 1;
+  string user_id = 2;
+  string request_message_id = 3;
+}
+
+message CancelRequestResponse {
+  bool accepted = 1;
+}
+
+// EvictSession drops disposable in-memory state. It does not mutate the
+// durable session and is safe to call when no cache entry exists.
+message EvictSessionRequest {
+  string session_id = 1;
+}
+
+message EvictSessionResponse {}
+
+message ChatResponse {
+  oneof event {
+    TextDelta text_delta = 1;
+    ToolCall tool_call = 2;
+    ToolResult tool_result = 3;
+    Error error = 4;
+    Done done = 5;
+  }
+}
+
+message TextDelta {
+  string message_id = 1;
+  string delta = 2;
+}
+
+message ToolCall {
+  string message_id = 1;
+  string tool_call_id = 2;
+  string tool = 3;
+  string arguments_json = 4;
+}
+
+message ToolResult {
+  string message_id = 1;
+  string tool_call_id = 2;
+  session.v2.ToolResultStatus status = 3;
+  repeated session.v2.ContentBlock content = 4;
+  string error_code = 5;
+}
+
+message Error {
+  string request_message_id = 1;
+  string code = 2;
+  string message = 3;
+  bool retryable = 4;
+}
+
+message Done {
+  string request_message_id = 1;
+  session.v2.ExecutionStatus status = 2;
+  int64 revision = 3;
+  session.v2.TokenUsage aggregate_usage = 4;
+}

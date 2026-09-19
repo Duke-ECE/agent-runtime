@@ -1,0 +1,395 @@
+syntax = "proto3";
+
+package session.v2;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/Duke-ECE/protos/gen/go/session/v2;v2";
+
+// SessionService owns canonical conversation history, request execution state,
+// fenced runtime leases, and context-compaction checkpoints.
+service SessionService {
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
+  rpc DeleteSession(DeleteSessionRequest) returns (DeleteSessionResponse);
+  rpc SetTitle(SetTitleRequest) returns (SetTitleResponse);
+
+  rpc BeginRequest(BeginRequestRequest) returns (BeginRequestResponse);
+  rpc AcquireLease(AcquireLeaseRequest) returns (AcquireLeaseResponse);
+  rpc RenewLease(RenewLeaseRequest) returns (RenewLeaseResponse);
+  rpc ReleaseLease(ReleaseLeaseRequest) returns (ReleaseLeaseResponse);
+  rpc AppendMessages(AppendMessagesRequest) returns (AppendMessagesResponse);
+  rpc FinishRequest(FinishRequestRequest) returns (FinishRequestResponse);
+  rpc CancelRequest(CancelRequestRequest) returns (CancelRequestResponse);
+
+  rpc GetMessages(GetMessagesRequest) returns (GetMessagesResponse);
+  rpc GetExecutionContext(GetExecutionContextRequest) returns (GetExecutionContextResponse);
+  rpc PublishCheckpoint(PublishCheckpointRequest) returns (PublishCheckpointResponse);
+}
+
+enum SessionStatus {
+  SESSION_STATUS_UNSPECIFIED = 0;
+  SESSION_STATUS_ACTIVE = 1;
+  SESSION_STATUS_ENDED = 2;
+}
+
+enum MessageRole {
+  MESSAGE_ROLE_UNSPECIFIED = 0;
+  MESSAGE_ROLE_USER = 1;
+  MESSAGE_ROLE_ASSISTANT = 2;
+  MESSAGE_ROLE_TOOL = 3;
+}
+
+enum MessageStatus {
+  MESSAGE_STATUS_UNSPECIFIED = 0;
+  MESSAGE_STATUS_COMPLETE = 1;
+  MESSAGE_STATUS_PARTIAL = 2;
+  MESSAGE_STATUS_INTERRUPTED = 3;
+}
+
+enum ExecutionStatus {
+  EXECUTION_STATUS_UNSPECIFIED = 0;
+  EXECUTION_STATUS_QUEUED = 1;
+  EXECUTION_STATUS_RUNNING = 2;
+  EXECUTION_STATUS_COMPLETED = 3;
+  EXECUTION_STATUS_FAILED = 4;
+  EXECUTION_STATUS_CANCELLED = 5;
+  EXECUTION_STATUS_INTERRUPTED = 6;
+}
+
+enum ToolResultStatus {
+  TOOL_RESULT_STATUS_UNSPECIFIED = 0;
+  TOOL_RESULT_STATUS_SUCCESS = 1;
+  TOOL_RESULT_STATUS_ERROR = 2;
+  TOOL_RESULT_STATUS_CANCELLED = 3;
+}
+
+message Session {
+  string id = 1;
+  string user_id = 2;
+  SessionStatus status = 3;
+  string agent_id = 4;
+  string title = 5;
+  int64 last_seq = 6;
+  int64 revision = 7;
+  string active_checkpoint_id = 8;
+  string active_request_message_id = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp last_active = 11;
+  google.protobuf.Timestamp ended_at = 12;
+}
+
+message SessionConfig {
+  string session_id = 1;
+  uint32 format_version = 2;
+  string config_hash = 3;
+  string system_prompt = 4;
+  string provider = 5;
+  string model = 6;
+  string base_url = 7;
+  string credential_ref = 8;
+  int64 context_window_tokens = 9;
+  int64 output_limit_tokens = 10;
+  repeated ToolDefinition tools = 11;
+  google.protobuf.Timestamp created_at = 12;
+}
+
+message ToolDefinition {
+  string name = 1;
+  string description = 2;
+  string input_schema_json = 3;
+  string version = 4;
+}
+
+message Message {
+  string id = 1;
+  string session_id = 2;
+  int64 seq = 3;
+  string request_message_id = 4;
+  MessageRole role = 5;
+  repeated ContentBlock content = 6;
+  uint32 format_version = 7;
+  MessageStatus status = 8;
+  string reply_to_message_id = 9;
+  TokenUsage usage = 10;
+  google.protobuf.Struct provider_metadata = 11;
+  RequestExecution request = 12;
+  google.protobuf.Timestamp created_at = 13;
+}
+
+message ContentBlock {
+  oneof value {
+    TextBlock text = 1;
+    ToolCallBlock tool_call = 2;
+    ToolResultBlock tool_result = 3;
+    OpaqueBlock opaque = 4;
+  }
+}
+
+message TextBlock {
+  string text = 1;
+}
+
+message ToolCallBlock {
+  string id = 1;
+  string name = 2;
+  string arguments_json = 3;
+}
+
+message ToolResultBlock {
+  string tool_call_id = 1;
+  ToolResultStatus status = 2;
+  repeated ContentBlock content = 3;
+  string error_code = 4;
+}
+
+// OpaqueBlock preserves provider continuation data that cannot be represented
+// by a portable block without exposing credentials or transport objects.
+message OpaqueBlock {
+  string provider = 1;
+  string type = 2;
+  bytes data_json = 3;
+}
+
+message TokenUsage {
+  int64 input_tokens = 1;
+  int64 cached_input_tokens = 2;
+  int64 output_tokens = 3;
+  int64 reasoning_tokens = 4;
+  int64 total_tokens = 5;
+}
+
+message RequestExecution {
+  string client_request_id = 1;
+  string request_hash = 2;
+  ExecutionStatus status = 3;
+  google.protobuf.Timestamp started_at = 4;
+  google.protobuf.Timestamp finished_at = 5;
+  string error_code = 6;
+  bool cancellation_requested = 7;
+}
+
+message ContextCheckpoint {
+  string id = 1;
+  string session_id = 2;
+  string parent_checkpoint_id = 3;
+  int64 covered_through_seq = 4;
+  int64 source_head_seq = 5;
+  int64 source_revision = 6;
+  string config_hash = 7;
+  string active_request_message_id = 8;
+  int64 resume_after_seq = 9;
+  repeated ContentBlock summary = 10;
+  uint32 format_version = 11;
+  string prompt_version = 12;
+  string summarizer_provider = 13;
+  string summarizer_model = 14;
+  int64 estimated_tokens_before = 15;
+  int64 estimated_tokens_after = 16;
+  TokenUsage generation_usage = 17;
+  google.protobuf.Timestamp created_at = 18;
+}
+
+message Lease {
+  string owner = 1;
+  int64 generation = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message MessageDraft {
+  string id = 1;
+  MessageRole role = 2;
+  repeated ContentBlock content = 3;
+  uint32 format_version = 4;
+  MessageStatus status = 5;
+  string reply_to_message_id = 6;
+  TokenUsage usage = 7;
+  google.protobuf.Struct provider_metadata = 8;
+}
+
+message MutationGuard {
+  string mutation_id = 1;
+  string mutation_hash = 2;
+  int64 expected_revision = 3;
+  int64 lease_generation = 4;
+}
+
+message CreateSessionRequest {
+  string user_id = 1;
+  string agent_id = 2;
+  SessionConfig config = 3;
+}
+
+message CreateSessionResponse {
+  Session session = 1;
+}
+
+message GetSessionRequest {
+  string session_id = 1;
+  string user_id = 2;
+}
+
+message GetSessionResponse {
+  Session session = 1;
+}
+
+message ListSessionsRequest {
+  string user_id = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+}
+
+message ListSessionsResponse {
+  repeated Session sessions = 1;
+  bool has_more = 2;
+}
+
+message EndSessionRequest {
+  string session_id = 1;
+  string user_id = 2;
+}
+
+message EndSessionResponse {
+  Session session = 1;
+}
+
+message DeleteSessionRequest {
+  string session_id = 1;
+  string user_id = 2;
+}
+
+message DeleteSessionResponse {}
+
+message SetTitleRequest {
+  string session_id = 1;
+  string user_id = 2;
+  string title = 3;
+}
+
+message SetTitleResponse {
+  Session session = 1;
+}
+
+message BeginRequestRequest {
+  string session_id = 1;
+  string user_id = 2;
+  string client_request_id = 3;
+  string request_hash = 4;
+  repeated ContentBlock content = 5;
+  uint32 format_version = 6;
+}
+
+message BeginRequestResponse {
+  Session session = 1;
+  Message request_message = 2;
+  bool deduplicated = 3;
+}
+
+message AcquireLeaseRequest {
+  string session_id = 1;
+  string request_message_id = 2;
+  string owner = 3;
+  int32 ttl_seconds = 4;
+}
+
+message AcquireLeaseResponse {
+  Session session = 1;
+  Lease lease = 2;
+}
+
+message RenewLeaseRequest {
+  string session_id = 1;
+  string owner = 2;
+  int64 generation = 3;
+  int32 ttl_seconds = 4;
+}
+
+message RenewLeaseResponse {
+  Lease lease = 1;
+}
+
+message ReleaseLeaseRequest {
+  string session_id = 1;
+  string owner = 2;
+  int64 generation = 3;
+}
+
+message ReleaseLeaseResponse {}
+
+message AppendMessagesRequest {
+  string session_id = 1;
+  string request_message_id = 2;
+  MutationGuard guard = 3;
+  repeated MessageDraft messages = 4;
+}
+
+message AppendMessagesResponse {
+  Session session = 1;
+  repeated Message messages = 2;
+  bool deduplicated = 3;
+}
+
+message FinishRequestRequest {
+  string session_id = 1;
+  string request_message_id = 2;
+  MutationGuard guard = 3;
+  ExecutionStatus status = 4;
+  repeated MessageDraft messages = 5;
+  string error_code = 6;
+}
+
+message FinishRequestResponse {
+  Session session = 1;
+  Message request_message = 2;
+  repeated Message messages = 3;
+  bool deduplicated = 4;
+}
+
+message CancelRequestRequest {
+  string session_id = 1;
+  string user_id = 2;
+  string request_message_id = 3;
+}
+
+message CancelRequestResponse {
+  Message request_message = 1;
+}
+
+message GetMessagesRequest {
+  string session_id = 1;
+  string user_id = 2;
+  int32 limit = 3;
+  int64 before_seq = 4;
+}
+
+message GetMessagesResponse {
+  repeated Message messages = 1;
+  bool has_more = 2;
+  int64 revision = 3;
+}
+
+message GetExecutionContextRequest {
+  string session_id = 1;
+}
+
+message GetExecutionContextResponse {
+  Session session = 1;
+  SessionConfig config = 2;
+  ContextCheckpoint checkpoint = 3;
+  repeated Message messages = 4;
+}
+
+message PublishCheckpointRequest {
+  string session_id = 1;
+  MutationGuard guard = 2;
+  ContextCheckpoint checkpoint = 3;
+}
+
+message PublishCheckpointResponse {
+  Session session = 1;
+  ContextCheckpoint checkpoint = 2;
+  bool deduplicated = 3;
+}
