@@ -386,6 +386,11 @@ function blockFromProto(raw: unknown): CanonicalBlock | null {
   }
 }
 
+/** Decode a runtime.v2 content array into canonical blocks (handler boundary). */
+export function canonicalBlocksFromProto(raw: unknown): CanonicalBlock[] {
+  return blocksFromProto(raw);
+}
+
 function blocksFromProto(raw: unknown): CanonicalBlock[] {
   if (!Array.isArray(raw)) return [];
   return raw
