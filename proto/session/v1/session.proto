@@ -128,7 +128,9 @@ message TurnMessage {
   int32 seq = 1;
   string role = 2;  // "user" | "assistant" | "tool_call" | "tool_result" |
                     // "system" (the session's persisted system prompt;
-                    // re-recorded when it changes, never a chat message)
+                    // re-recorded when it changes, never a chat message) |
+                    // "config" (the session's frozen resolved LLM triple;
+                    // api_key is redacted on owner-path reads)
   string content_json = 3;  // role-specific payload, JSON-encoded
   string created_at = 4;  // RFC 3339
 }

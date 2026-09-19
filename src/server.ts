@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
 import * as grpc from "@grpc/grpc-js";
@@ -6,6 +7,7 @@ import * as protoLoader from "@grpc/proto-loader";
 import { loadConfig, type ServiceConfig } from "./config.js";
 import { extractTranscriptLlm, extractTranscriptSystemPrompt, transcriptToMessages } from "./hydrate.js";
 import { createModel, createStreamFn, type SessionLlmConfig } from "./llm.js";
+import { createDurableRuntime, type DurableRuntime } from "./durable-runtime.js";
 import { createSessionClient, type TranscriptTurn, type TurnMessageInput } from "./session-client.js";
 import { SessionManager, assertOwner, grpcError } from "./session-manager.js";
 import { generateTitle, sanitizeTitle, type TitleGenerator } from "./title.js";
@@ -46,6 +48,19 @@ function resolveProtoPath(): string {
   throw new Error("proto/runtime/v1/agent.proto not found; run `npm run sync-proto`");
 }
 
+function resolveProtoPathV2(): string {
+  for (const rel of ["../../proto/runtime/v2/agent.proto", "../proto/runtime/v2/agent.proto"]) {
+    const candidate = fileURLToPath(new URL(rel, import.meta.url));
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error("proto/runtime/v2/agent.proto not found; run `npm run sync-proto`");
+}
+
+/** protobufjs resolves imports from the proto root, not the file's directory. */
+function protoRootOf(file: string): string {
+  return dirname(dirname(dirname(file)));
+}
+
 function isRetryableLlmError(message: string | undefined): boolean {
   if (!message) return false;
   return /rate.?limit|429|timeout|timed out|overloaded|502|503|529|econnreset|fetch failed|network/i.test(message);
@@ -78,6 +93,8 @@ function toolResultText(result: unknown): string {  if (result && typeof result 
 export interface Runtime {
   server: grpc.Server;
   sessions: SessionManager<RuntimeSession>;
+  /** The durable runtime.v2 service; absent only when the proto is missing. */
+  durable?: DurableRuntime;
 }
 
 export interface RuntimeOptions {
@@ -497,7 +514,29 @@ export function createRuntime(
 
   const server = new grpc.Server();
   server.addService(proto.runtime.v1.AgentService.service, service);
-  return { server, sessions };
+
+  // runtime.v2 is served alongside v1: the browser backend moves to the durable
+  // contract while the legacy path keeps working during migration.
+  let durable: DurableRuntime | undefined;
+  try {
+    const v2Definition = protoLoader.loadSync(resolveProtoPathV2(), {
+      keepCase: true,
+      longs: String,
+      enums: String,
+      defaults: true,
+      oneofs: true,
+      includeDirs: [protoRootOf(resolveProtoPathV2())],
+    });
+    const protoV2 = grpc.loadPackageDefinition(v2Definition) as unknown as {
+      runtime: { v2: { AgentService: { service: grpc.ServiceDefinition } } };
+    };
+    durable = createDurableRuntime(config, executor);
+    server.addService(protoV2.runtime.v2.AgentService.service, durable.service);
+  } catch (err) {
+    console.warn("runtime.v2 is not being served:", err instanceof Error ? err.message : err);
+  }
+
+  return { server, sessions, durable };
 }
 
 async function main(): Promise<void> {
