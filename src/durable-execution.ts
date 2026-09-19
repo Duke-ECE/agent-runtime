@@ -51,6 +51,11 @@ export function batchHashOf(messages: MessageDraftInput[]): string {
   return createHash("sha256").update(JSON.stringify(messages)).digest("hex");
 }
 
+/** Deterministic hash of a checkpoint payload, for its idempotency guard. */
+function hashOf(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
 export function newOwnerId(): string {
   return `runtime-${randomUUID()}`;
 }
@@ -61,6 +66,12 @@ export class DurableExecution {
   readonly owner: string;
   /** True when session-manager deduplicated the request (a reconnect). */
   readonly deduplicated: boolean;
+  /**
+   * The request root (the initiating user message). It is part of the
+   * model-facing context, so a caller assembling that context must include it —
+   * leaving it out under-counts the input by the whole user message.
+   */
+  readonly requestMessage: CanonicalMessage;
 
   private readonly client: DurableSessionClient;
   private readonly leaseTtlSeconds: number;
@@ -79,6 +90,7 @@ export class DurableExecution {
   private constructor(
     client: DurableSessionClient,
     session: DurableSessionRecord,
+    requestMessage: CanonicalMessage,
     requestMessageId: string,
     owner: string,
     deduplicated: boolean,
@@ -89,6 +101,7 @@ export class DurableExecution {
     this.telemetry = options.telemetry ?? jsonLineSink;
     this.sessionValue = session;
     this.requestMessageId = requestMessageId;
+    this.requestMessage = requestMessage;
     this.owner = owner;
     this.deduplicated = deduplicated;
     this.leaseGenerationValue = leaseGeneration;
@@ -129,6 +142,7 @@ export class DurableExecution {
     const execution = new DurableExecution(
       options.client,
       session,
+      admitted.requestMessage,
       requestMessageId,
       owner,
       admitted.deduplicated,
@@ -261,9 +275,11 @@ export class DurableExecution {
     checkpoint: Omit<DurableCheckpointRecord, "sessionId" | "createdAt">,
   ): Promise<DurableCheckpointRecord> {
     this.assertLeaseHeld();
+    // The guard needs a hash, exactly as append and finish do: session-manager
+    // rejects a mutation without one, so publication would always fail.
     const result = await this.client.publishCheckpoint({
       sessionId: this.sessionId,
-      guard: this.nextGuard(),
+      guard: { ...this.nextGuard(), mutationHash: hashOf(checkpoint) },
       checkpoint,
     });
     this.sessionValue = result.session;

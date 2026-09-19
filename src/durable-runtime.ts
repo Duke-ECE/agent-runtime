@@ -401,6 +401,11 @@ export function createDurableRuntime(
         return;
       }
 
+      // The request root is part of what the model sees; without it the
+      // estimator would under-count the input by the whole user message and
+      // compaction would fire late or never.
+      live.canonical.push(active.requestMessage);
+
       let persistedAssistant: string | undefined;
       let finalAssistant: AssistantMessage | undefined;
       const streamMessageId = `asst-${Date.now()}`;

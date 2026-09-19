@@ -37,7 +37,8 @@ class FakeClient implements DurableSessionClient {
   readonly appendCalls: Array<Record<string, unknown>> = [];
   readonly finishCalls: Array<Record<string, unknown>> = [];
   readonly renewCalls: Array<Record<string, unknown>> = [];
-  releaseCalls = 0;
+  releaseCalls = 0
+  readonly publishGuards: Array<Record<string, unknown>> = [];
   deduplicated = false;
   appendError?: Error;
   renewError?: Error;
@@ -132,6 +133,7 @@ class FakeClient implements DurableSessionClient {
   }
 
   async publishCheckpoint(req: any): Promise<{ session: DurableSessionRecord; checkpoint: DurableCheckpointRecord; deduplicated: boolean }> {
+    this.publishGuards.push(req.guard)
     return {
       session: sessionRecord({ revision: ++this.revision }),
       checkpoint: { ...req.checkpoint, sessionId: "sess-1" },
@@ -297,6 +299,36 @@ test("a refused write is still recorded, marked as failed", async () => {
     const writes = records.filter((r) => r.event === "durable_write");
     assert.equal(writes.length, 1, "a failed write is still measured");
     assert.equal(writes[0].ok, false);
+  } finally {
+    execution.dispose();
+  }
+});
+
+test("a published checkpoint carries a mutation hash", async () => {
+  const client = new FakeClient();
+  const execution = await DurableExecution.start({ client, ...baseOptions });
+  try {
+    const published = await execution.publishCheckpoint({
+      id: "cp-1",
+      parentCheckpointId: "",
+      coveredThroughSeq: 1,
+      sourceHeadSeq: 1,
+      sourceRevision: 1,
+      configHash: "cfg",
+      activeRequestMessageId: execution.requestMessageId,
+      resumeAfterSeq: 1,
+      summary: [text("earlier context")],
+      formatVersion: 1,
+      promptVersion: "v1",
+      summarizerProvider: "p",
+      summarizerModel: "m",
+      estimatedTokensBefore: 10,
+      estimatedTokensAfter: 5,
+    });
+    assert.equal(published.id, "cp-1");
+    // session-manager rejects a mutation without a hash, so an empty one would
+    // make every compaction fail to publish.
+    assert.ok(client.publishGuards[0].mutationHash, "the guard has no mutation hash");
   } finally {
     execution.dispose();
   }
