@@ -47,7 +47,7 @@ test("every record is flat, single-event, and free of content or credentials", (
   recordLeaseConflict(sink, { sessionId: "s", requestMessageId: "r", reason: "aborted" });
   recordDurableWrite(sink, {
     sessionId: "s", requestMessageId: "r", kind: "append",
-    mutationId: "r:1", messageCount: 2, latencyMs: 12,
+    mutationId: "r:1", messageCount: 2, latencyMs: 12, ok: true,
   });
   recordHydrationFailure(sink, { sessionId: "s", reason: "timeout", messageCount: 0, pageCount: 3 });
 
@@ -78,7 +78,7 @@ test("lease, write, and hydration records carry the operational fields", () => {
   recordLeaseConflict(sink, { sessionId: "sess-1", requestMessageId: "msg-1", reason: "aborted" });
   recordDurableWrite(sink, {
     sessionId: "sess-1", requestMessageId: "msg-1", kind: "finish",
-    mutationId: "msg-1:3", messageCount: 1, latencyMs: 38,
+    mutationId: "msg-1:3", messageCount: 1, latencyMs: 38, ok: true,
   });
   recordHydrationFailure(sink, { sessionId: "sess-1", reason: "lease expired" });
 

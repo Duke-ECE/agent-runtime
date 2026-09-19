@@ -86,6 +86,8 @@ export interface WriteTelemetry {
   mutationId: string;
   messageCount: number;
   latencyMs: number;
+  /** False when the write was refused or failed; latency still matters then. */
+  ok: boolean;
 }
 
 /**
@@ -101,6 +103,7 @@ export function recordDurableWrite(sink: TelemetrySink, t: WriteTelemetry): void
     mutation_id: t.mutationId,
     message_count: t.messageCount,
     latency_ms: t.latencyMs,
+    ok: t.ok,
   });
 }
 

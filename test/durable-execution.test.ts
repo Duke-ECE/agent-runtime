@@ -256,3 +256,48 @@ test("request hashes are deterministic and content-sensitive", () => {
   assert.equal(requestHashOf([text("a")]), requestHashOf([text("a")]));
   assert.notEqual(requestHashOf([text("a")]), requestHashOf([text("b")]));
 });
+
+test("each acknowledged durable write records its latency and outcome", async () => {
+  const client = new FakeClient();
+  const records: Array<Record<string, unknown>> = [];
+  const execution = await DurableExecution.start({
+    client,
+    ...baseOptions,
+    telemetry: (record) => records.push(record),
+  });
+  try {
+    await execution.persist([draft("msg-a1", "running pwd")]);
+    await execution.finish("completed", [draft("msg-a2", "done")]);
+
+    const writes = records.filter((r) => r.event === "durable_write");
+    assert.equal(writes.length, 2, "one record per acknowledged write");
+    assert.equal(writes[0].kind, "append");
+    assert.equal(writes[0].ok, true);
+    assert.equal(writes[0].message_count, 1);
+    assert.equal(writes[0].session_id, "sess-1");
+    assert.ok(typeof writes[0].latency_ms === "number");
+    assert.equal(writes[1].kind, "finish");
+    assert.equal(writes[1].message_count, 1);
+  } finally {
+    execution.dispose();
+  }
+});
+
+test("a refused write is still recorded, marked as failed", async () => {
+  const client = new FakeClient();
+  client.appendError = new DurableRpcError(10, "aborted", "lease owner or generation does not match");
+  const records: Array<Record<string, unknown>> = [];
+  const execution = await DurableExecution.start({
+    client,
+    ...baseOptions,
+    telemetry: (record) => records.push(record),
+  });
+  try {
+    await assert.rejects(execution.persist([draft("msg-a1", "x")]));
+    const writes = records.filter((r) => r.event === "durable_write");
+    assert.equal(writes.length, 1, "a failed write is still measured");
+    assert.equal(writes[0].ok, false);
+  } finally {
+    execution.dispose();
+  }
+});

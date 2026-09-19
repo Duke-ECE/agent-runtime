@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { CanonicalBlock, CanonicalMessage } from "./canonical.js";
+import { elapsedMs, jsonLineSink, recordDurableWrite, type TelemetrySink } from "./telemetry.js";
 import {
   DurableRpcError,
   type DurableCheckpointRecord,
@@ -36,6 +37,8 @@ export interface DurableExecutionOptions {
   renewIntervalMs?: number;
   /** Invoked once when the lease is lost; the caller must abort inference. */
   onLeaseLost?: (err: Error) => void;
+  /** Where durable-write latency records go; defaults to one JSON line each. */
+  telemetry?: TelemetrySink;
 }
 
 /** Deterministic hash of a request's content, used for dedup conflict detection. */
@@ -63,6 +66,7 @@ export class DurableExecution {
   private readonly leaseTtlSeconds: number;
   private readonly renewIntervalMs: number;
   private readonly onLeaseLost?: (err: Error) => void;
+  private readonly telemetry: TelemetrySink;
   private renewTimer?: NodeJS.Timeout;
   private mutationSeq = 0;
   private finished = false;
@@ -79,9 +83,10 @@ export class DurableExecution {
     owner: string,
     deduplicated: boolean,
     leaseGeneration: number,
-    options: Pick<DurableExecutionOptions, "leaseTtlSeconds" | "renewIntervalMs" | "onLeaseLost">,
+    options: Pick<DurableExecutionOptions, "leaseTtlSeconds" | "renewIntervalMs" | "onLeaseLost" | "telemetry">,
   ) {
     this.client = client;
+    this.telemetry = options.telemetry ?? jsonLineSink;
     this.sessionValue = session;
     this.requestMessageId = requestMessageId;
     this.owner = owner;
@@ -225,15 +230,30 @@ export class DurableExecution {
     if (messages.length === 0) return [];
     this.assertLeaseHeld();
     const guard: MutationGuard = { ...this.nextGuard(), mutationHash: batchHashOf(messages) };
-    const result = await this.client.appendMessages({
-      sessionId: this.sessionId,
-      requestMessageId: this.requestMessageId,
-      guard,
-      messages,
-    });
-    this.sessionValue = result.session;
-    this.revisionValue = result.session.revision;
-    return result.messages;
+    const startedAt = Date.now();
+    let ok = false;
+    try {
+      const result = await this.client.appendMessages({
+        sessionId: this.sessionId,
+        requestMessageId: this.requestMessageId,
+        guard,
+        messages,
+      });
+      ok = true;
+      this.sessionValue = result.session;
+      this.revisionValue = result.session.revision;
+      return result.messages;
+    } finally {
+      recordDurableWrite(this.telemetry, {
+        sessionId: this.sessionId,
+        requestMessageId: this.requestMessageId,
+        kind: "append",
+        mutationId: guard.mutationId,
+        messageCount: messages.length,
+        latencyMs: elapsedMs(startedAt),
+        ok,
+      });
+    }
   }
 
   /** Publish a compaction checkpoint under the current lease. */
@@ -270,17 +290,32 @@ export class DurableExecution {
       ...this.nextGuard(),
       mutationHash: batchHashOf(messages),
     };
-    const result = await this.client.finishRequest({
-      sessionId: this.sessionId,
-      requestMessageId: this.requestMessageId,
-      guard,
-      status,
-      messages,
-      errorCode,
-    });
-    this.sessionValue = result.session;
-    this.revisionValue = result.session.revision;
-    return result.messages;
+    const startedAt = Date.now();
+    let ok = false;
+    try {
+      const result = await this.client.finishRequest({
+        sessionId: this.sessionId,
+        requestMessageId: this.requestMessageId,
+        guard,
+        status,
+        messages,
+        errorCode,
+      });
+      ok = true;
+      this.sessionValue = result.session;
+      this.revisionValue = result.session.revision;
+      return result.messages;
+    } finally {
+      recordDurableWrite(this.telemetry, {
+        sessionId: this.sessionId,
+        requestMessageId: this.requestMessageId,
+        kind: "finish",
+        mutationId: guard.mutationId,
+        messageCount: messages.length,
+        latencyMs: elapsedMs(startedAt),
+        ok,
+      });
+    }
   }
 
   /**

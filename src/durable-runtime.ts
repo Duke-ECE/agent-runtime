@@ -354,6 +354,7 @@ export function createDurableRuntime(
         userId,
         clientRequestId,
         content,
+        telemetry,
         onLeaseLost: (err) => {
           recordLeaseConflict(telemetry, { sessionId, requestMessageId: execution?.requestMessageId, reason: err.message });
           live.agent.abort();
