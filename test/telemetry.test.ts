@@ -6,6 +6,7 @@ import {
   recordDurableWrite,
   recordHydrationFailure,
   recordLeaseConflict,
+  recordUnresolvedToolCalls,
   type TelemetryRecord,
 } from "../src/telemetry.js";
 
@@ -95,4 +96,15 @@ test("elapsed time is never negative", () => {
   assert.equal(elapsedMs(1_000, () => 1_250), 250);
   // A clock that goes backwards must not produce a negative duration.
   assert.equal(elapsedMs(1_000, () => 900), 0);
+});
+
+test("unresolved tool calls are recorded with their count, never their bodies", () => {
+  const { records, sink } = capture();
+  recordUnresolvedToolCalls(sink, { sessionId: "sess-1", assistantMessageId: "msg-a1", toolCallCount: 2 });
+  assert.deepEqual(records[0], {
+    event: "unresolved_tool_calls",
+    session_id: "sess-1",
+    assistant_message_id: "msg-a1",
+    tool_call_count: 2,
+  });
 });

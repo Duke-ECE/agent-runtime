@@ -107,6 +107,28 @@ export function recordDurableWrite(sink: TelemetrySink, t: WriteTelemetry): void
   });
 }
 
+export interface UnresolvedToolTelemetry {
+  sessionId: string;
+  /** The assistant message that issued the calls. */
+  assistantMessageId: string;
+  toolCallCount: number;
+}
+
+/**
+ * Record tool calls found without a persisted result. This is the crash case:
+ * the runtime died between persisting the call and persisting the observed
+ * result, so the outcome is unknown. They are excluded from model context and
+ * the turn needs an explicit retry decision — never a replay.
+ */
+export function recordUnresolvedToolCalls(sink: TelemetrySink, t: UnresolvedToolTelemetry): void {
+  sink({
+    event: "unresolved_tool_calls",
+    session_id: t.sessionId,
+    assistant_message_id: t.assistantMessageId,
+    tool_call_count: t.toolCallCount,
+  });
+}
+
 export interface HydrationTelemetry {
   sessionId: string;
   /** Machine-readable reason; a provider or transport message is a detail, not

@@ -10,6 +10,7 @@ import {
   toolCall,
   toolResult,
   unresolvedToolCalls,
+  unresolvedToolCallsInHistory,
   usageFromPi,
   usageToPi,
   validateBlocks,
@@ -101,13 +102,15 @@ test("canonicalToPi rebuilds user, assistant, and tool messages", () => {
 test("historyToPi excludes incomplete assistant output but keeps user and tool messages", () => {
   const history = [
     message({ id: "m1", role: "user", seq: 1, content: [text("go")] }),
-    message({ id: "m2", role: "assistant", seq: 2, status: "partial", content: [text("half a sen")] }),
+    message({ id: "m2", role: "assistant", seq: 2, content: [toolCall("call_1", "bash", {})] }),
     message({ id: "m3", role: "tool", seq: 3, content: [toolResult("call_1", "error", [text("boom")])] }),
+    message({ id: "m4", role: "assistant", seq: 4, status: "partial", content: [text("half a sen")] }),
   ];
   const pi = historyToPi(history, identity);
-  assert.equal(pi.length, 2);
+  assert.equal(pi.length, 3, "the partial assistant message is excluded");
   assert.equal(pi[0].role, "user");
-  assert.equal(pi[1].role, "toolResult");
+  assert.equal(pi[1].role, "assistant");
+  assert.equal(pi[2].role, "toolResult");
 });
 
 test("usage normalization does not double-count cached input", () => {
@@ -171,10 +174,11 @@ test("historyToPi caps tool output but leaves user and assistant content alone",
   const long = "z".repeat(500);
   const history: CanonicalMessage[] = [
     message({ id: "m1", role: "user", seq: 1, content: [text(long)] }),
+    message({ id: "m2", role: "assistant", seq: 2, content: [toolCall("call_1", "bash", {})] }),
     message({
-      id: "m2",
+      id: "m3",
       role: "tool",
-      seq: 2,
+      seq: 3,
       content: [toolResult("call_1", "success", [text(long)])],
     }),
   ];
@@ -182,8 +186,84 @@ test("historyToPi caps tool output but leaves user and assistant content alone",
   const user = pi[0] as UserMessage;
   const userText = user.content as Array<{ type: string; text?: string }>;
   assert.equal(userText[0].text, long, "user input is never truncated");
-  const tool = pi[1] as ToolResultMessage;
+  const tool = pi[2] as ToolResultMessage;
   const toolText = tool.content as Array<{ type: string; text?: string }>;
   assert.ok((toolText[0].text ?? "").length < long.length, "tool output is capped");
   assert.match(toolText[0].text ?? "", /truncated:/);
+});
+
+test("a tool call with no persisted result is reported as unresolved", () => {
+  const history: CanonicalMessage[] = [
+    message({ id: "m1", role: "user", seq: 1, content: [text("run pwd")] }),
+    message({
+      id: "m2",
+      role: "assistant",
+      seq: 2,
+      content: [toolCall("call_crash", "bash", { command: "pwd" })],
+    }),
+  ];
+  assert.deepEqual(unresolvedToolCallsInHistory(history), [
+    { assistantMessageId: "m2", toolCallIds: ["call_crash"] },
+  ]);
+});
+
+test("resolved and parallel tool calls are not reported", () => {
+  const history: CanonicalMessage[] = [
+    message({ id: "m1", role: "user", seq: 1, content: [text("go")] }),
+    message({
+      id: "m2",
+      role: "assistant",
+      seq: 2,
+      content: [toolCall("call_a", "bash", {}), toolCall("call_b", "read", {})],
+    }),
+    message({
+      id: "m3",
+      role: "tool",
+      seq: 3,
+      // Parallel results arrive out of order; both must still count as resolved.
+      content: [toolResult("call_b", "success", [text("b")]), toolResult("call_a", "error", [text("a")])],
+    }),
+  ];
+  assert.deepEqual(unresolvedToolCallsInHistory(history), []);
+});
+
+test("a crash-dangling tool call is never replayed to the provider", () => {
+  const history: CanonicalMessage[] = [
+    message({ id: "m1", role: "user", seq: 1, content: [text("run pwd")] }),
+    message({
+      id: "m2",
+      role: "assistant",
+      seq: 2,
+      content: [text("running pwd"), toolCall("call_crash", "bash", { command: "pwd" })],
+    }),
+  ];
+  const pi = historyToPi(history, identity);
+  const assistant = pi[1] as AssistantMessage;
+  const kinds = (assistant.content as Array<{ type: string }>).map((part) => part.type);
+  assert.ok(!kinds.includes("toolCall"), "a dangling call must not reach the provider");
+  assert.deepEqual(kinds, ["text"], "the assistant text is kept");
+});
+
+test("an orphan tool result whose call is gone is dropped, not sent alone", () => {
+  const history: CanonicalMessage[] = [
+    message({
+      id: "m9",
+      role: "tool",
+      seq: 9,
+      content: [toolResult("call_summarized_away", "success", [text("old output")])],
+    }),
+  ];
+  assert.deepEqual(historyToPi(history, identity), []);
+});
+
+test("paired calls and results both survive hydration", () => {
+  const history: CanonicalMessage[] = [
+    message({ id: "m1", role: "user", seq: 1, content: [text("go")] }),
+    message({ id: "m2", role: "assistant", seq: 2, content: [toolCall("call_1", "bash", {})] }),
+    message({ id: "m3", role: "tool", seq: 3, content: [toolResult("call_1", "success", [text("ok")])] }),
+  ];
+  const pi = historyToPi(history, identity);
+  assert.equal(pi.length, 3);
+  assert.equal((pi[1] as AssistantMessage).content[0].type, "toolCall");
+  assert.equal((pi[2] as ToolResultMessage).toolCallId, "call_1");
 });

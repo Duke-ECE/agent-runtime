@@ -328,11 +328,20 @@ export function historyToPi(
   for (const message of messages) {
     if (message.role === "assistant" && message.status !== "complete") continue;
     // Tool results are capped for the model only; the canonical message keeps
-    // the full output, and the cut names where to read it.
-    const content =
-      message.role === "tool"
-        ? truncateForModel(message.content, policy, message.id).blocks
-        : message.content;
+    // the full output, and the cut names where to read it. A call whose result
+    // never landed (a crash) and a result whose call is gone (compaction) are
+    // both dropped: neither can be replayed to a provider safely.
+    let content: CanonicalBlock[];
+    if (message.role === "tool") {
+      const calls = new Set<string>();
+      for (const other of messages) for (const id of toolCallIds(other.content)) calls.add(id);
+      content = pairedResultContent(calls, truncateForModel(message.content, policy, message.id).blocks);
+      if (content.length === 0) continue;
+    } else if (message.role === "assistant") {
+      content = pairedBlocks(messages, message.content);
+    } else {
+      content = message.content;
+    }
     out.push(...canonicalToPi({ ...message, content }, identity));
   }
   return out;
@@ -397,4 +406,70 @@ export function truncateForModel(
 
   const out = walk(blocks);
   return { blocks: truncated ? out : blocks, truncated };
+}
+
+/**
+ * Tool calls in the history that have no persisted result, and the assistant
+ * message that issued each. This is the crash case: a runtime can die after
+ * persisting the call but before persisting the observed result, so the
+ * outcome is genuinely unknown.
+ */
+export interface UnresolvedToolCalls {
+  assistantMessageId: string;
+  toolCallIds: string[];
+}
+
+/**
+ * Find tool calls recorded without their result anywhere in the given history.
+ * The caller must not replay these: an unknown outcome is not a success, and a
+ * provider protocol is never satisfied by inventing a result for one.
+ */
+export function unresolvedToolCallsInHistory(messages: CanonicalMessage[]): UnresolvedToolCalls[] {
+  const resolved = new Set<string>();
+  for (const message of messages) {
+    for (const ref of toolResultRefs(message.content)) resolved.add(ref);
+  }
+  const out: UnresolvedToolCalls[] = [];
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    const dangling = toolCallIds(message.content).filter((id) => !resolved.has(id));
+    if (dangling.length > 0) out.push({ assistantMessageId: message.id, toolCallIds: dangling });
+  }
+  return out;
+}
+
+/**
+ * Keep only tool calls whose result is present, and only results whose call is
+ * present. A dangling call would be rejected by the provider (or worse, invite
+ * a fabricated result), and an orphan result refers to a summarized-away call.
+ * Assistant messages that lose every block keep an empty text block so the
+ * message is still well-formed.
+ */
+function pairedBlocks(messages: CanonicalMessage[], content: CanonicalBlock[]): CanonicalBlock[] {
+  const calls = new Set<string>();
+  const results = new Set<string>();
+  for (const message of messages) {
+    for (const id of toolCallIds(message.content)) calls.add(id);
+    for (const id of toolResultRefs(message.content)) results.add(id);
+  }
+  const out: CanonicalBlock[] = [];
+  for (const block of content) {
+    if (block.type === "tool_call") {
+      if (results.has(block.id)) out.push(block);
+      continue;
+    }
+    if (block.type === "tool_result") {
+      if (calls.has(block.tool_call_id)) out.push(block);
+      continue;
+    }
+    out.push(block);
+  }
+  return out.length > 0 ? out : [text("")];
+}
+
+/**
+ * Unpair-safe tool-result content: keeps results whose call is present.
+ */
+function pairedResultContent(calls: Set<string>, blocks: CanonicalBlock[]): CanonicalBlock[] {
+  return blocks.filter((block) => block.type !== "tool_result" || calls.has(block.tool_call_id));
 }

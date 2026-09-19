@@ -6,6 +6,7 @@ import {
   DEFAULT_TRUNCATION,
   historyToPi,
   text,
+  unresolvedToolCallsInHistory,
   usageFromPi,
   type CanonicalBlock,
   type CanonicalMessage,
@@ -31,6 +32,7 @@ import {
   jsonLineSink,
   recordCompaction,
   recordLeaseConflict,
+  recordUnresolvedToolCalls,
   type TelemetrySink,
 } from "./telemetry.js";
 import {
@@ -258,6 +260,18 @@ export function createDurableRuntime(
       if (checkpoint && beforeSeq <= checkpoint.coveredThroughSeq + 1) break;
     }
     const retained = checkpoint ? collected.filter((message) => message.seq > checkpoint.coveredThroughSeq) : collected;
+
+    // A crash can leave a tool call persisted without its result. The outcome
+    // is unknown, so those calls are excluded from model context (see
+    // historyToPi) and reported: the turn needs an explicit retry decision
+    // rather than a silent replay.
+    for (const dangling of unresolvedToolCallsInHistory(retained)) {
+      recordUnresolvedToolCalls(telemetry, {
+        sessionId,
+        assistantMessageId: dangling.assistantMessageId,
+        toolCallCount: dangling.toolCallIds.length,
+      });
+    }
 
     const llm: SessionLlmConfig = {
       // The frozen configuration carries a credential reference; until private
