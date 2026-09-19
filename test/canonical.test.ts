@@ -4,6 +4,7 @@ import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil
 import {
   canonicalToPi,
   duplicateToolCallIds,
+  truncateForModel,
   historyToPi,
   text,
   toolCall,
@@ -12,6 +13,7 @@ import {
   usageFromPi,
   usageToPi,
   validateBlocks,
+  type CanonicalBlock,
   type CanonicalMessage,
 } from "../src/canonical.js";
 
@@ -121,4 +123,67 @@ test("usage normalization does not double-count cached input", () => {
   assert.equal(back.input, 100);
   assert.equal(back.cacheRead, 30);
   assert.equal(usageFromPi(undefined), undefined);
+});
+
+test("short tool results are not touched", () => {
+  const blocks = [toolResult("call_1", "success", [text("short output")])];
+  const result = truncateForModel(blocks, { maxToolResultChars: 100 }, "msg-t1");
+  assert.equal(result.truncated, false);
+  assert.equal(result.blocks, blocks, "an untouched result should be returned as-is");
+});
+
+test("a tool result exactly at the cap is not truncated", () => {
+  const exact = "x".repeat(100);
+  const result = truncateForModel([toolResult("call_1", "success", [text(exact)])], { maxToolResultChars: 100 }, "msg-t1");
+  assert.equal(result.truncated, false);
+  const block = result.blocks[0];
+  assert.equal(block.type, "tool_result");
+});
+
+test("an oversized tool result is cut with an explicit, named marker", () => {
+  const body = "x".repeat(1_000);
+  const result = truncateForModel([toolResult("call_1", "success", [text(body)])], { maxToolResultChars: 100 }, "msg-t9");
+  assert.equal(result.truncated, true);
+  const block = result.blocks[0];
+  assert.equal(block.type, "tool_result");
+  if (block.type !== "tool_result") return;
+  const inner = block.content[0];
+  assert.equal(inner.type, "text");
+  if (inner.type !== "text") return;
+  assert.ok(inner.text.startsWith("x".repeat(100)), "the cap is applied verbatim");
+  assert.match(inner.text, /truncated: 900 of 1000 characters omitted/);
+  assert.match(inner.text, /preserved in message msg-t9/);
+});
+
+test("truncation never mutates the stored result", () => {
+  const body = "y".repeat(500);
+  const stored = [toolResult("call_1", "success", [text(body)])];
+  const result = truncateForModel(stored, { maxToolResultChars: 50 }, "msg-t1");
+  assert.equal(result.truncated, true);
+  const storedInner = (stored[0] as { content: CanonicalBlock[] }).content[0];
+  assert.equal(storedInner.type, "text");
+  if (storedInner.type === "text") {
+    assert.equal(storedInner.text, body, "the canonical message must keep the full output");
+  }
+});
+
+test("historyToPi caps tool output but leaves user and assistant content alone", () => {
+  const long = "z".repeat(500);
+  const history: CanonicalMessage[] = [
+    message({ id: "m1", role: "user", seq: 1, content: [text(long)] }),
+    message({
+      id: "m2",
+      role: "tool",
+      seq: 2,
+      content: [toolResult("call_1", "success", [text(long)])],
+    }),
+  ];
+  const pi = historyToPi(history, identity, { maxToolResultChars: 20 });
+  const user = pi[0] as UserMessage;
+  const userText = user.content as Array<{ type: string; text?: string }>;
+  assert.equal(userText[0].text, long, "user input is never truncated");
+  const tool = pi[1] as ToolResultMessage;
+  const toolText = tool.content as Array<{ type: string; text?: string }>;
+  assert.ok((toolText[0].text ?? "").length < long.length, "tool output is capped");
+  assert.match(toolText[0].text ?? "", /truncated:/);
 });

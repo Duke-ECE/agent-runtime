@@ -15,6 +15,12 @@ export interface ServiceConfig {
   serviceToken?: string;
   /** Max transcript messages fetched when hydrating a session on resume. */
   hydrationMaxTurns: number;
+  /**
+   * Max characters of a single tool result exposed to the model. The stored
+   * result is never altered; the cut names where to read it. Optional so a
+   * caller that does not care about truncation still gets the default.
+   */
+  toolResultMaxChars?: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig {
@@ -30,5 +36,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
     sessionManagerAddr: env.SESSION_MANAGER_ADDR || undefined,
     serviceToken: env.SERVICE_TOKEN || undefined,
     hydrationMaxTurns: Number(env.HYDRATION_MAX_TURNS ?? 50),
+    toolResultMaxChars: Number(env.TOOL_RESULT_MAX_CHARS ?? 20_000),
   };
 }

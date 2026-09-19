@@ -319,11 +319,82 @@ function parseArguments(raw: string): Record<string, unknown> {
  * design's recovery rule): the caller inserts an explicit recovery note instead
  * of replaying unfinished model output.
  */
-export function historyToPi(messages: CanonicalMessage[], identity: PiIdentity): AgentMessage[] {
+export function historyToPi(
+  messages: CanonicalMessage[],
+  identity: PiIdentity,
+  policy: TruncationPolicy = DEFAULT_TRUNCATION,
+): AgentMessage[] {
   const out: AgentMessage[] = [];
   for (const message of messages) {
     if (message.role === "assistant" && message.status !== "complete") continue;
-    out.push(...canonicalToPi(message, identity));
+    // Tool results are capped for the model only; the canonical message keeps
+    // the full output, and the cut names where to read it.
+    const content =
+      message.role === "tool"
+        ? truncateForModel(message.content, policy, message.id).blocks
+        : message.content;
+    out.push(...canonicalToPi({ ...message, content }, identity));
   }
   return out;
+}
+
+// ------------------------------------------------- model-facing truncation
+
+/**
+ * How much of a tool result may reach the model. The stored canonical message is
+ * never altered: this only bounds the copy assembled into a provider request, so
+ * a huge tool output cannot blow the context window while the original stays
+ * readable in the transcript.
+ */
+export interface TruncationPolicy {
+  /** Maximum characters of tool-result text exposed to the model. */
+  maxToolResultChars: number;
+}
+
+export const DEFAULT_TRUNCATION: TruncationPolicy = { maxToolResultChars: 20_000 };
+
+export interface TruncatedContent {
+  blocks: CanonicalBlock[];
+  /** True when any block was shortened. */
+  truncated: boolean;
+}
+
+/**
+ * Shorten a tool result for the model, leaving the original untouched.
+ *
+ * The cut carries an explicit marker naming how much was removed and, when the
+ * caller knows it, the canonical message the full result lives in — an
+ * authorized range read can then fetch it. Truncation is never silent: a model
+ * that saw a cut result must be able to tell that it was cut.
+ */
+export function truncateForModel(
+  blocks: CanonicalBlock[],
+  policy: TruncationPolicy = DEFAULT_TRUNCATION,
+  originalMessageId?: string,
+): TruncatedContent {
+  let truncated = false;
+
+  const walk = (input: CanonicalBlock[]): CanonicalBlock[] =>
+    input.map((block) => {
+      if (block.type === "text") {
+        if (block.text.length <= policy.maxToolResultChars) return block;
+        truncated = true;
+        const omitted = block.text.length - policy.maxToolResultChars;
+        const where = originalMessageId ? ` in message ${originalMessageId}` : "";
+        return {
+          type: "text",
+          text:
+            block.text.slice(0, policy.maxToolResultChars) +
+            `\n[truncated: ${omitted} of ${block.text.length} characters omitted; the full tool result is preserved${where}]`,
+        };
+      }
+      if (block.type === "tool_result") {
+        const nested = walk(block.content);
+        return nested === block.content ? block : { ...block, content: nested };
+      }
+      return block;
+    });
+
+  const out = walk(blocks);
+  return { blocks: truncated ? out : blocks, truncated };
 }

@@ -3,12 +3,14 @@ import { Agent, type AgentMessage, type StreamFn } from "@earendil-works/pi-agen
 import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import * as grpc from "@grpc/grpc-js";
 import {
+  DEFAULT_TRUNCATION,
   historyToPi,
   text,
   usageFromPi,
   type CanonicalBlock,
   type CanonicalMessage,
   type CanonicalUsage,
+  type TruncationPolicy,
 } from "./canonical.js";
 import { compact, summaryText } from "./compaction.js";
 import type { ServiceConfig } from "./config.js";
@@ -181,6 +183,7 @@ function contextMessages(
   live: LiveSession,
   checkpoint: DurableCheckpointRecord,
   retained: CanonicalMessage[],
+  truncationPolicy: TruncationPolicy,
 ): AgentMessage[] {
   const messages: AgentMessage[] = [];
   const summary = summaryText(checkpoint);
@@ -192,7 +195,9 @@ function contextMessages(
     });
   }
   const model = createModel(live.llm);
-  messages.push(...historyToPi(retained, { api: model.api, provider: model.provider, model: model.id }));
+  messages.push(
+    ...historyToPi(retained, { api: model.api, provider: model.provider, model: model.id }, truncationPolicy),
+  );
   return messages;
 }
 
@@ -206,6 +211,9 @@ export function createDurableRuntime(
   const modelFactory =
     options.modelFactory ?? ((llm: SessionLlmConfig) => ({ model: createModel(llm), streamFn: createStreamFn(llm) }));
   const telemetry = options.telemetry ?? jsonLineSink;
+  const toolResultMaxChars = config.toolResultMaxChars ?? DEFAULT_TRUNCATION.maxToolResultChars;
+  const truncationPolicy: TruncationPolicy =
+    toolResultMaxChars > 0 ? { maxToolResultChars: toolResultMaxChars } : DEFAULT_TRUNCATION;
 
   if (!client) {
     // SESSION_MANAGER_ADDR unset: v2 has no durable boundary at all, so every
@@ -270,7 +278,7 @@ export function createDurableRuntime(
         timestamp: Date.now(),
       });
     }
-    messages.push(...historyToPi(retained, identity));
+    messages.push(...historyToPi(retained, identity, truncationPolicy));
 
     const allTools = buildTools(executor);
     const wanted = (frozen.tools ?? [])
@@ -475,7 +483,7 @@ export function createDurableRuntime(
           return {
             context: {
               ...hook.context,
-              messages: contextMessages(live, result.checkpoint, result.cutoff.retained),
+              messages: contextMessages(live, result.checkpoint, result.cutoff.retained, truncationPolicy),
             },
           };
         } catch (err) {
