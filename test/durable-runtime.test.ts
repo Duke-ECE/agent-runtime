@@ -173,6 +173,8 @@ function scriptedStream(events: unknown[], finalMessage: Record<string, unknown>
   return stream;
 }
 
+let clock = Date.now();
+
 function assistantMessage(parts: unknown[], stopReason = "stop"): Record<string, unknown> {
   return {
     role: "assistant",
@@ -182,8 +184,14 @@ function assistantMessage(parts: unknown[], stopReason = "stop"): Record<string,
     model: "gpt-4o-mini",
     usage: { input: 11, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 14, cost: {} },
     stopReason,
-    timestamp: Date.now(),
+    // Monotonic so consecutive scripted messages get distinct canonical ids.
+    timestamp: ++clock,
   };
+}
+
+interface Script {
+  events: unknown[];
+  finalMessage: Record<string, unknown>;
 }
 
 interface FakeCall {
@@ -230,12 +238,17 @@ function chatRequest(content: CanonicalBlock[], clientRequestId = "req-1"): unkn
   };
 }
 
-function runtimeFor(client: FakeClient, events: unknown[], finalMessage: Record<string, unknown>) {
+function runtimeFor(client: FakeClient, scripts: Script[]) {
+  let turn = 0;
   return createDurableRuntime(config, undefined, {
     client,
     modelFactory: (llm) => ({
       model: createModel(llm),
-      streamFn: () => scriptedStream(events, finalMessage) as never,
+      // One script per provider request; later calls reuse the last script.
+      streamFn: () => {
+        const script = scripts[Math.min(turn++, scripts.length - 1)];
+        return scriptedStream(script.events, script.finalMessage) as never;
+      },
     }),
   });
 }
@@ -264,7 +277,7 @@ test("a completed turn is admitted, leased, and finished with one terminal write
     { type: "done", reason: "stop", message: assistantMessage([{ type: "text", text: "hello world" }]) },
   ];
   const final = assistantMessage([{ type: "text", text: "hello world" }]);
-  const runtime = runtimeFor(client, events, final);
+  const runtime = runtimeFor(client, [{ events, finalMessage: final }]);
   const service = runtime.service as Record<string, (call: any) => void>;
 
   const call = fakeCall(chatRequest([text("hi")]));
@@ -303,7 +316,7 @@ test("a reconnect is deduplicated and never reruns or rewrites the request", asy
   const client = new FakeClient();
   client.deduplicated = true;
   const events = [{ type: "done", reason: "stop", message: assistantMessage([{ type: "text", text: "unused" }]) }];
-  const runtime = runtimeFor(client, events, assistantMessage([{ type: "text", text: "unused" }]));
+  const runtime = runtimeFor(client, [{ events, finalMessage: assistantMessage([{ type: "text", text: "unused" }]) }]);
   const service = runtime.service as Record<string, (call: any) => void>;
 
   const call = fakeCall(chatRequest([text("hi")]));
@@ -324,7 +337,7 @@ test("a failed model call is reported and finishes as failed", async () => {
   const failure = assistantMessage([{ type: "text", text: "" }], "error");
   failure.errorMessage = "429 rate limited";
   const events = [{ type: "error", reason: "error", error: failure }];
-  const runtime = runtimeFor(client, events, failure);
+  const runtime = runtimeFor(client, [{ events, finalMessage: failure }]);
   const service = runtime.service as Record<string, (call: any) => void>;
 
   const call = fakeCall(chatRequest([text("hi")]));
@@ -339,4 +352,90 @@ test("a failed model call is reported and finishes as failed", async () => {
   assert.equal(client.finished.length, 1);
   assert.equal(client.finished[0].status, "failed");
   assert.equal(call.writes.some((w) => w.done), false, "a failed request must not report done");
+});
+
+test("tool calls are persisted before dispatch and results before the next model call", async () => {
+  const client = new FakeClient();
+  const toolCallId = "call_1";
+
+  const toolCallMessage = assistantMessage(
+    [
+      { type: "text", text: "running pwd" },
+      { type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "pwd" } },
+    ],
+    "toolUse",
+  );
+  const finalText = assistantMessage([{ type: "text", text: "the sandbox is unavailable" }]);
+
+  const runtime = runtimeFor(client, [
+    {
+      events: [
+        { type: "start", partial: { ...toolCallMessage, content: [] } },
+        { type: "toolcall_start", contentIndex: 0, partial: toolCallMessage },
+        {
+          type: "toolcall_end",
+          contentIndex: 0,
+          toolCall: { id: toolCallId, name: "bash", arguments: { command: "pwd" } },
+          partial: toolCallMessage,
+        },
+        { type: "done", reason: "toolUse", message: toolCallMessage },
+      ],
+      finalMessage: toolCallMessage,
+    },
+    {
+      events: [
+        { type: "start", partial: { ...finalText, content: [] } },
+        { type: "text_delta", delta: "the sandbox is unavailable", partial: finalText },
+        { type: "done", reason: "stop", message: finalText },
+      ],
+      finalMessage: finalText,
+    },
+  ]);
+  const service = runtime.service as Record<string, (call: any) => void>;
+
+  const call = fakeCall(chatRequest([text("run pwd")]));
+  service.chat(call);
+  await waitFor(() => call.ended || call.errors.length > 0);
+
+  // Two durable batches: the assistant tool-call message, then the observed
+  // result. Both are appended (acknowledged) rather than saved at turn end.
+  assert.ok(client.appended.length >= 2, `expected at least 2 acknowledged batches, got ${client.appended.length}`);
+  const assistantBatch = client.appended[0];
+  assert.equal(assistantBatch.length, 1);
+  assert.equal(assistantBatch[0].role, "assistant");
+  const callBlock = assistantBatch[0].content.find((block) => block.type === "tool_call");
+  assert.ok(callBlock, "the assistant tool-call message must be persisted before dispatch");
+  if (callBlock.type === "tool_call") {
+    assert.equal(callBlock.id, toolCallId);
+    assert.equal(callBlock.name, "bash");
+    assert.equal(callBlock.arguments_json, '{"command":"pwd"}');
+  }
+
+  const toolBatch = client.appended[1];
+  assert.equal(toolBatch.length, 1);
+  assert.equal(toolBatch[0].role, "tool");
+  // The result links back by the original id, never by adjacency or tool name.
+  assert.equal(toolBatch[0].replyToMessageId, assistantBatch[0].id);
+  const resultBlock = toolBatch[0].content[0];
+  assert.equal(resultBlock.type, "tool_result");
+  if (resultBlock.type === "tool_result") {
+    assert.equal(resultBlock.tool_call_id, toolCallId);
+    // NullExecutor fails, and the failure is recorded, not hidden.
+    assert.equal(resultBlock.status, "error");
+  }
+
+  // Both frames stream to the browser with the same original id.
+  const toolCallFrame = call.writes.find((w) => w.tool_call);
+  const toolResultFrame = call.writes.find((w) => w.tool_result);
+  assert.equal(toolCallFrame?.tool_call.tool_call_id, toolCallId);
+  assert.equal(toolResultFrame?.tool_result.tool_call_id, toolCallId);
+  assert.equal(toolResultFrame?.tool_result.status, "TOOL_RESULT_STATUS_ERROR");
+
+  // The terminal write carries the final assistant text, and only once.
+  assert.equal(client.finished.length, 1);
+  assert.equal(client.finished[0].status, "completed");
+  const finalBatch = client.finished[0].messages as MessageDraftInput[];
+  assert.equal(finalBatch.length, 1);
+  assert.deepEqual(finalBatch[0].content, [{ type: "text", text: "the sandbox is unavailable" }]);
+  assert.ok(call.writes.some((w) => w.done));
 });
