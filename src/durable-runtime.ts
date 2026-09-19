@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { Agent, type AgentMessage, type StreamFn } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import * as grpc from "@grpc/grpc-js";
 import {
   historyToPi,
@@ -68,6 +68,13 @@ export interface DurableRuntimeOptions {
   /** Injectable durable client; defaults to the gRPC client from the config. */
   client?: DurableSessionClient;
   budget?: Partial<BudgetConfig>;
+  /**
+   * Builds the model and stream function for a session. Tests inject a scripted
+   * stream so the durable boundaries can be driven without a provider.
+   */
+  modelFactory?: (llm: SessionLlmConfig) => { model: Model<any>; streamFn: StreamFn };
+  /** Summarizer used by compaction; tests inject a deterministic one. */
+  summarizer?: (prompt: string, live: { llm: SessionLlmConfig }) => Promise<{ text: string; usage?: CanonicalUsage }>;
 }
 
 export interface DurableRuntime {
@@ -187,6 +194,8 @@ export function createDurableRuntime(
 ): DurableRuntime {
   const client = options.client ?? createDurableSessionClient(config);
   const sessions = new Map<string, LiveSession>();
+  const modelFactory =
+    options.modelFactory ?? ((llm: SessionLlmConfig) => ({ model: createModel(llm), streamFn: createStreamFn(llm) }));
 
   if (!client) {
     // SESSION_MANAGER_ADDR unset: v2 has no durable boundary at all, so every
@@ -239,7 +248,7 @@ export function createDurableRuntime(
       baseUrl: frozen.baseUrl || config.llm.baseUrl,
       model: frozen.model || config.llm.model,
     };
-    const model = createModel(llm);
+    const { model, streamFn } = modelFactory(llm);
     const identity = { api: model.api, provider: model.provider, model: model.id };
 
     const messages: AgentMessage[] = [];
@@ -281,7 +290,7 @@ export function createDurableRuntime(
         tools: sessionTools,
         ...(messages.length > 0 ? { messages } : {}),
       },
-      streamFn: createStreamFn(llm),
+      streamFn,
       sessionId,
     });
     sessions.set(sessionId, live);
@@ -420,7 +429,8 @@ export function createDurableRuntime(
         try {
           const result = await compact({
             publisher: active,
-            summarizer: (prompt) => summarize(live, prompt),
+            summarizer: (prompt) =>
+              options.summarizer ? options.summarizer(prompt, live) : summarize(live, prompt),
             messages: live.canonical,
             budget: live.budget,
             active: live.lastCheckpoint,
