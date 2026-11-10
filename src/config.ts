@@ -15,6 +15,8 @@ export interface ServiceConfig {
   serviceToken?: string;
   /** Max transcript messages fetched when hydrating a session on resume. */
   hydrationMaxTurns: number;
+  /** Internal sandbox-manager gRPC address; unset keeps tools disabled. */
+  sandboxManagerAddr?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig {
@@ -30,5 +32,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
     sessionManagerAddr: env.SESSION_MANAGER_ADDR || undefined,
     serviceToken: env.SERVICE_TOKEN || undefined,
     hydrationMaxTurns: Number(env.HYDRATION_MAX_TURNS ?? 50),
+    sandboxManagerAddr: env.SANDBOX_MANAGER_ADDR || undefined,
   };
 }

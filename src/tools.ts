@@ -13,7 +13,8 @@ export interface ToolExecutionResult {
  * NullExecutor; a sandbox-backed executor plugs in here later.
  */
 export interface ToolExecutor {
-  execute(tool: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolExecutionResult>;
+  execute(tool: string, args: Record<string, unknown>, signal?: AbortSignal, sessionId?: string): Promise<ToolExecutionResult>;
+  closeSession?(sessionId: string): Promise<void>;
 }
 
 export const SANDBOX_NOT_CONNECTED = "tool execution unavailable: sandbox not connected";
@@ -21,7 +22,7 @@ export const SANDBOX_NOT_CONNECTED = "tool execution unavailable: sandbox not co
 /** Every tool call fails with a fixed error so the agent loop continues and
  * the LLM can tell the user that tools are unavailable. */
 export class NullExecutor implements ToolExecutor {
-  async execute(_tool: string, _args: Record<string, unknown>, _signal?: AbortSignal): Promise<ToolExecutionResult> {
+  async execute(_tool: string, _args: Record<string, unknown>, _signal?: AbortSignal, _sessionId?: string): Promise<ToolExecutionResult> {
     return { ok: false, error: SANDBOX_NOT_CONNECTED };
   }
 }
@@ -31,6 +32,7 @@ function bridgedTool<T extends TSchema>(
   description: string,
   parameters: T,
   executor: ToolExecutor,
+  sessionId?: string,
 ): AgentTool<T> {
   return {
     name,
@@ -38,7 +40,7 @@ function bridgedTool<T extends TSchema>(
     description,
     parameters,
     execute: async (_toolCallId, params, signal) => {
-      const result = await executor.execute(name, params as Record<string, unknown>, signal);
+      const result = await executor.execute(name, params as Record<string, unknown>, signal, sessionId);
       // pi convention: throw on failure; the agent reports it to the LLM as a
       // tool error (isError: true) and the loop continues.
       if (!result.ok) {
@@ -65,7 +67,7 @@ const writeSchema = Type.Object({
 
 const bashSchema = Type.Object({
   command: Type.String({ description: "Bash command to execute" }),
-  timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+  timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional; sandbox manager applies a default and maximum)" })),
 });
 
 const editSchema = Type.Object({
@@ -85,31 +87,35 @@ const editSchema = Type.Object({
   ),
 });
 
-export function buildTools(executor: ToolExecutor): AgentTool[] {
+export function buildTools(executor: ToolExecutor, sessionId?: string): AgentTool[] {
   return [
     bridgedTool(
       "read",
       "Read the contents of a file. Supports text files. Output may be truncated; use offset/limit for large files.",
       readSchema,
       executor,
+      sessionId,
     ),
     bridgedTool(
       "write",
       "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
       writeSchema,
       executor,
+      sessionId,
     ),
     bridgedTool(
       "bash",
       "Execute a bash command in the current working directory. Returns stdout and stderr. Optionally provide a timeout in seconds.",
       bashSchema,
       executor,
+      sessionId,
     ),
     bridgedTool(
       "edit",
       "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file.",
       editSchema,
       executor,
+      sessionId,
     ),
   ];
 }
