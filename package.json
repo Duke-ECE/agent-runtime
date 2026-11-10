@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "gRPC agent session runtime for the Duke-ECE managed-agents platform, built on pi-ai/pi-agent-core",
+  "description": "gRPC agent session runtime for the PolyAgent platform, built on pi-ai/pi-agent-core",
   "engines": {
     "node": ">=22"
   },
