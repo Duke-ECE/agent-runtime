@@ -39,6 +39,8 @@ spec:
                   optional: true
             - name: SESSION_MANAGER_ADDR
               value: "session-manager:50053"
+            - name: SANDBOX_MANAGER_ADDR
+              value: "sandbox-manager.pi-sandbox-system.svc.cluster.local:50051"
             - name: SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
