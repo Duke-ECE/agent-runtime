@@ -1,0 +1,114 @@
+syntax = "proto3";
+
+package sandbox.v3;
+
+option go_package = "github.com/Duke-ECE/protos/gen/go/sandbox/v3;v3";
+
+// SessionSandboxService owns a workspace for the lifetime of one platform session.
+// Cube identifiers and credentials never cross this interface.
+service SessionSandboxService {
+  rpc EnsureSessionSandbox(EnsureSessionSandboxRequest) returns (EnsureSessionSandboxResponse);
+  rpc ExecuteTool(ExecuteToolRequest) returns (ExecuteToolResponse);
+  rpc PutResource(stream PutResourceRequest) returns (PutResourceResponse);
+  rpc GetResource(GetResourceRequest) returns (stream GetResourceResponse);
+  rpc CloseSessionSandbox(CloseSessionSandboxRequest) returns (CloseSessionSandboxResponse);
+  rpc GetSessionSandboxStatus(GetSessionSandboxStatusRequest) returns (GetSessionSandboxStatusResponse);
+}
+
+message EnsureSessionSandboxRequest {
+  string session_id = 1;
+  string profile_id = 2; // empty selects the manager's default profile
+}
+
+message EnsureSessionSandboxResponse {
+  SessionSandboxState state = 1;
+}
+
+message ExecuteToolRequest {
+  string session_id = 1;
+  int64 timeout_seconds = 2; // manager caps this value
+  oneof tool {
+    ReadTool read = 3;
+    WriteTool write = 4;
+    EditTool edit = 5;
+    BashTool bash = 6;
+  }
+}
+
+message ReadTool {
+  string path = 1;
+  int64 offset_lines = 2;
+  int64 limit_lines = 3;
+}
+
+message WriteTool {
+  string path = 1;
+  string content = 2;
+}
+
+message EditTool {
+  string path = 1;
+  string old_text = 2;
+  string new_text = 3;
+  repeated EditReplacement edits = 4; // applied against one original file snapshot
+}
+
+message EditReplacement {
+  string old_text = 1;
+  string new_text = 2;
+}
+
+message BashTool {
+  string command = 1;
+}
+
+message ExecuteToolResponse {
+  int32 exit_code = 1;
+  string stdout = 2;
+  string stderr = 3;
+  bool truncated = 4;
+}
+
+// Each PutResource stream must start with session_id and path. Subsequent
+// chunks may omit them, but a changed non-empty value is invalid.
+message PutResourceRequest {
+  string session_id = 1;
+  string path = 2;
+  bytes chunk = 3;
+}
+
+message PutResourceResponse {
+  int64 bytes_written = 1;
+}
+
+message GetResourceRequest {
+  string session_id = 1;
+  string path = 2;
+}
+
+message GetResourceResponse {
+  bytes chunk = 1;
+}
+
+message CloseSessionSandboxRequest {
+  string session_id = 1;
+}
+
+message CloseSessionSandboxResponse {}
+
+message GetSessionSandboxStatusRequest {
+  string session_id = 1;
+}
+
+message GetSessionSandboxStatusResponse {
+  SessionSandboxState state = 1;
+}
+
+enum SessionSandboxState {
+  SESSION_SANDBOX_STATE_UNSPECIFIED = 0;
+  SESSION_SANDBOX_STATE_ABSENT = 1;
+  SESSION_SANDBOX_STATE_CREATING = 2;
+  SESSION_SANDBOX_STATE_READY = 3;
+  SESSION_SANDBOX_STATE_LOST = 4;
+  SESSION_SANDBOX_STATE_CLOSING = 5;
+}

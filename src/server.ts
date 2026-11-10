@@ -4,6 +4,7 @@ import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { loadConfig, type ServiceConfig } from "./config.js";
+import { CubeToolExecutor } from "./cube-executor.js";
 import { extractTranscriptLlm, extractTranscriptSystemPrompt, transcriptToMessages } from "./hydrate.js";
 import { createModel, createStreamFn, type SessionLlmConfig } from "./llm.js";
 import { createSessionClient, type TranscriptTurn, type TurnMessageInput } from "./session-client.js";
@@ -12,6 +13,7 @@ import { generateTitle, sanitizeTitle, type TitleGenerator } from "./title.js";
 import { buildTools, NullExecutor, type ToolExecutor } from "./tools.js";
 
 interface RuntimeSession {
+  sessionId: string;
   agent: Agent;
   llm: SessionLlmConfig;
   /** True until the first completed Chat turn has been offered a generated title. */
@@ -97,7 +99,12 @@ export function createRuntime(
   const sessions = new SessionManager<RuntimeSession>({
     maxSessions: config.maxSessions,
     ttlMs: config.sessionTtlMinutes * 60_000,
-    destroyAgent: ({ agent }) => agent.abort(),
+    destroyAgent: ({ agent, sessionId }) => {
+      agent.abort();
+      if (executor.closeSession) {
+        void executor.closeSession(sessionId).catch((err) => console.warn(`Cube close failed for ${sessionId}:`, err));
+      }
+    },
   });
   const sessionClient = createSessionClient(config);
 
@@ -136,7 +143,6 @@ export function createRuntime(
       // Optional tool whitelist: empty/absent = all built-ins; unknown names
       // are rejected before any session state (or hydration fetch) happens.
       const allTools = buildTools(executor);
-      let sessionTools = allTools;
       if (toolNames && toolNames.length > 0) {
         const known = new Set(allTools.map((t) => t.name));
         const unknown = toolNames.filter((name) => !known.has(name));
@@ -147,7 +153,6 @@ export function createRuntime(
           );
           return;
         }
-        sessionTools = allTools.filter((t) => toolNames.includes(t.name));
       }
       try {
         // Hydration fetch first: a caller-provided session id may have a
@@ -256,6 +261,7 @@ export function createRuntime(
         const session = sessions.create(
           user_id,
           (sessionId) => ({
+            sessionId,
             llm: resolved,
             // Only a session that began empty gets an auto title after its
             // first completed turn; hydrated/history-seeded sessions don't.
@@ -271,7 +277,7 @@ export function createRuntime(
               initialState: {
                 systemPrompt,
                 model,
-                tools: sessionTools,
+                tools: buildTools(executor, sessionId).filter((tool) => !toolNames || toolNames.length === 0 || toolNames.includes(tool.name)),
                 ...(history ? { messages: history } : {}),
               },
               streamFn: createStreamFn(resolved),
@@ -502,7 +508,8 @@ export function createRuntime(
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const { server, sessions } = createRuntime(config);
+  const executor = config.sandboxManagerAddr ? new CubeToolExecutor(config.sandboxManagerAddr) : new NullExecutor();
+  const { server, sessions } = createRuntime(config, executor);
   sessions.start();
 
   const address = `0.0.0.0:${config.port}`;
@@ -516,6 +523,7 @@ async function main(): Promise<void> {
 
   const shutdown = () => {
     sessions.stop();
+    if (executor instanceof CubeToolExecutor) executor.close();
     server.tryShutdown(() => process.exit(0));
   };
   process.on("SIGINT", shutdown);

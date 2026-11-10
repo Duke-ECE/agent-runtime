@@ -9,7 +9,7 @@ OpenAI-compatible LLM endpoint.
 
 Implements `runtime.v1.AgentService` from the
 [Duke-ECE/protos](https://github.com/Duke-ECE/protos) repo
-(`proto/runtime/v1/agent.proto`, pinned to tag `v0.7.0`). The proto is loaded
+(`proto/runtime/v1/agent.proto`, pinned to tag `v0.9.1`). The proto is loaded
 at runtime with `@grpc/grpc-js` + `@grpc/proto-loader` — no codegen.
 
 Methods: `CreateSession`, `EndSession`, `ListSessions`, `Chat` (server-streaming:
@@ -109,11 +109,13 @@ Hydration ignores the extra key (hydrated assistant messages get zero usage).
 ## Tools
 
 The agent exposes `read` / `write` / `bash` / `edit` tools (schemas modeled on
-pi-coding-agent). Execution goes through a `ToolExecutor` interface; v1 ships
-only `NullExecutor`, which fails every call with
-`tool execution unavailable: sandbox not connected` so the agent loop continues
-and the LLM can tell the user tools are unavailable. A sandbox-backed executor
-plugs into `ToolExecutor` later.
+pi-coding-agent). Execution goes through a `ToolExecutor` interface. With
+`SANDBOX_MANAGER_ADDR` unset, `NullExecutor` reports that tools are unavailable.
+When set, `CubeToolExecutor` calls the manager's session-scoped `sandbox.v3`
+service: it ensures a sandbox for the current session, sends a typed tool call,
+and relays the result. Multi-replacement edits are applied against one original
+file snapshot in the manager. The runtime never receives Cube credentials or
+Cube sandbox IDs. The deployment manifest leaves this feature off by default.
 
 ## Environment variables
 
@@ -126,6 +128,7 @@ plugs into `ToolExecutor` later.
 | `LLM_API_KEY`         | _(none)_                      | Fallback API key when `CreateSession.llm` omits it |
 | `LLM_BASE_URL`        | `https://api.openai.com/v1`   | Fallback OpenAI-compatible base URL           |
 | `LLM_MODEL`           | `gpt-4o-mini`                 | Fallback model id                             |
+| `SANDBOX_MANAGER_ADDR` | _(none)_ | Internal gRPC address of sandbox-manager; unset keeps tools disabled |
 
 The server boots fine with no `LLM_*` env set; `Chat` then returns an `error`
 event explaining the LLM is not configured.
