@@ -1,6 +1,6 @@
 # agent-runtime
 
-gRPC service that hosts agent sessions for the Duke-ECE managed-agents platform.
+gRPC service that hosts agent sessions for the PolyAgent platform.
 Each session embeds a [pi](https://github.com/earendil-works/pi) agent
 (`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`) pointed at any
 OpenAI-compatible LLM endpoint.
