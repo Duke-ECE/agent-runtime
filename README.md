@@ -63,6 +63,12 @@ model) wins; anything absent falls back to `LLM_API_KEY` / `LLM_BASE_URL` /
 `LLM_MODEL` env vars. Once a session has started, though, its LLM triple is
 **frozen**: see the config-turn paragraph below.
 
+For `deepseek-flash` on the official `api.deepseek.com` endpoint, the runtime
+adds `thinking: {"type":"disabled"}` to each OpenAI-compatible request.
+DeepSeek otherwise defaults to high-effort thinking, while this runtime only
+streams final answer text. Other models and endpoints keep their existing
+request behavior. The public API and CLI do not expose a thinking setting.
+
 `CreateSession` also accepts an optional `system_prompt` (empty = no system
 prompt — the runtime carries no built-in default; the platform's "Default
 assistant" template lives in the backend's template store, which sends the
