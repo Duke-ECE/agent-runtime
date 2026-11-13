@@ -57,6 +57,7 @@ message ChatRequest {
   string session_id = 1;
   string content = 2;
   string user_id = 3;  // ownership enforced when set
+  string thinking_mode = 4;  // empty = session mode; off = disable for this turn only
 }
 
 message Session {

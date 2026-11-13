@@ -17,6 +17,7 @@ interface RuntimeSession {
   sessionId: string;
   agent: Agent;
   llm: SessionLlmConfig;
+  turnThinkingMode: { value?: "off" };
   /** True until the first completed Chat turn has been offered a generated title. */
   titlePending: boolean;
   /**
@@ -305,30 +306,34 @@ export function createRuntime(
         const systemPrompt = system_prompt || transcriptSystemPrompt;
         const session = sessions.create(
           user_id,
-          (sessionId) => ({
-            sessionId,
-            llm: resolved,
-            // Only a session that began empty gets an auto title after its
-            // first completed turn; hydrated/history-seeded sessions don't.
-            titlePending: !history,
-            systemPrompt,
-            // Seed the "last recorded" markers from the transcript so an
-            // unchanged prompt/triple is not re-recorded on the next
-            // AppendTurn. A transcript without a config turn leaves the LLM
-            // marker undefined, so the first AppendTurn records the triple.
-            lastRecordedSystemPrompt: transcriptSystemPrompt || undefined,
-            lastRecordedLlm: frozenLlm ? JSON.stringify(frozenLlm) : undefined,
-            agent: new Agent({
-              initialState: {
-                systemPrompt,
-                model,
-                tools: buildTools(executor, sessionId).filter((tool) => !toolNames || toolNames.length === 0 || toolNames.includes(tool.name)),
-                ...(history ? { messages: history } : {}),
-              },
-              streamFn: createStreamFn(resolved),
+          (sessionId) => {
+            const turnThinkingMode: { value?: "off" } = {};
+            return {
               sessionId,
-            }),
-          }),
+              llm: resolved,
+              turnThinkingMode,
+              // Only a session that began empty gets an auto title after its
+              // first completed turn; hydrated/history-seeded sessions don't.
+              titlePending: !history,
+              systemPrompt,
+              // Seed the "last recorded" markers from the transcript so an
+              // unchanged prompt/triple is not re-recorded on the next
+              // AppendTurn. A transcript without a config turn leaves the LLM
+              // marker undefined, so the first AppendTurn records the triple.
+              lastRecordedSystemPrompt: transcriptSystemPrompt || undefined,
+              lastRecordedLlm: frozenLlm ? JSON.stringify(frozenLlm) : undefined,
+              agent: new Agent({
+                initialState: {
+                  systemPrompt,
+                  model,
+                  tools: buildTools(executor, sessionId).filter((tool) => !toolNames || toolNames.length === 0 || toolNames.includes(tool.name)),
+                  ...(history ? { messages: history } : {}),
+                },
+                streamFn: createStreamFn(resolved, () => turnThinkingMode.value),
+                sessionId,
+              }),
+            };
+          },
           session_id || undefined,
         );
         callback(null, { session_id: session.id });
@@ -364,10 +369,11 @@ export function createRuntime(
     },
 
     chat(call: grpc.ServerWritableStream<any, any>) {
-      const { session_id, content, user_id } = call.request as {
+      const { session_id, content, user_id, thinking_mode } = call.request as {
         session_id?: string;
         content?: string;
         user_id?: string;
+        thinking_mode?: string;
       };
       let session;
       try {
@@ -378,6 +384,15 @@ export function createRuntime(
         return;
       }
       const { agent, llm } = session.agent;
+      if (thinking_mode && thinking_mode !== "off") {
+        failStream(call, grpcError(grpc.status.INVALID_ARGUMENT, "only thinking_mode off is supported per turn"));
+        return;
+      }
+      if (thinking_mode === "off" && llm.thinkingMode !== "off" &&
+          !(llm.model === "deepseek-flash" && URL.canParse(llm.baseUrl) && new URL(llm.baseUrl).hostname === "api.deepseek.com")) {
+        failStream(call, grpcError(grpc.status.INVALID_ARGUMENT, "thinking_mode off is not supported for this model"));
+        return;
+      }
       if (agent.state.isStreaming) {
         failStream(
           call,
@@ -396,6 +411,7 @@ export function createRuntime(
         return;
       }
       sessions.touch(session.id);
+      session.agent.turnThinkingMode.value = thinking_mode === "off" ? "off" : undefined;
       const initialMessageCount = agent.state.messages.length;
 
       let inputTokens = 0;
@@ -553,6 +569,7 @@ export function createRuntime(
           }
         })
         .finally(() => {
+          session.agent.turnThinkingMode.value = undefined;
           unsubscribe();
           sessions.touch(session.id);
         });

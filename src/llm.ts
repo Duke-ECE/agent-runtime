@@ -62,14 +62,15 @@ export function createModel(config: SessionLlmConfig): Model<"openai-completions
  * Stream function for the pi Agent loop: delegates to pi-ai's OpenAI chat
  * completions streaming, injecting the session's API key on every call.
  */
-export function createStreamFn(config: SessionLlmConfig): StreamFn {
-  const thinkingMode = resolveThinkingMode(config);
-  return (model, context, options) =>
-    openAiCompletionsStreamSimple(model as Model<"openai-completions">, context, {
+export function createStreamFn(config: SessionLlmConfig, turnOverride?: () => "off" | undefined): StreamFn {
+  return (model, context, options) => {
+    // Resolve on every provider call so tool follow-ups share the active
+    // turn override. Clearing the override restores the frozen session mode.
+    const thinkingMode = resolveThinkingMode({ ...config, thinkingMode: turnOverride?.() ?? config.thinkingMode });
+    return openAiCompletionsStreamSimple(model as Model<"openai-completions">, context, {
       ...options,
       apiKey: config.apiKey,
-      // The public mode is session-scoped; translate it into DeepSeek's wire
-      // parameters only here. provider_default leaves the payload untouched.
+      // provider_default leaves the provider payload untouched.
       onPayload: thinkingMode !== "provider_default"
         ? async (payload, selectedModel) => {
             const customized = (await options?.onPayload?.(payload, selectedModel)) ?? payload;
@@ -80,4 +81,5 @@ export function createStreamFn(config: SessionLlmConfig): StreamFn {
           }
         : options?.onPayload,
     });
+  };
 }

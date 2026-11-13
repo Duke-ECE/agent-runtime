@@ -70,6 +70,10 @@ absent mode keeps the compatibility default of `off`. Explicit `off` sends
 and matching `reasoning_effort`; `provider_default` leaves both parameters
 absent. Other endpoints accept only `provider_default` or an absent mode.
 The chat stream contains final answer text, not reasoning content.
+`ChatRequest.thinking_mode = "off"` temporarily disables thinking for one
+message, including its tool follow-up calls. An empty value uses the frozen
+session mode; the next message therefore returns to that mode automatically.
+Other per-turn values are rejected.
 
 `CreateSession` also accepts an optional `system_prompt` (empty = no system
 prompt — the runtime carries no built-in default; the platform's "Default

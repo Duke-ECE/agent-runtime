@@ -340,6 +340,17 @@ test("DeepSeek thinking resumes after restart with the original reasoning", asyn
   assert.equal(toolAssistant.tool_calls[0].id, "call_1");
 });
 
+test("one-turn off covers tool follow-ups and restores the session mode", async (t) => {
+  const run = await setup(t, (i) => i === 1 ? toolCallReply() : textReply("done"),
+    { withSessionManager: true, deepSeekThinking: true });
+  await run.chat({ session_id: run.sessionId, content: "quick list", user_id: "alice", thinking_mode: "off" });
+  assert.deepEqual(run.llmBodies().slice(0, 2).map((body) => body.thinking),
+    [{ type: "disabled" }, { type: "disabled" }]);
+  await run.chat({ session_id: run.sessionId, content: "think again", user_id: "alice" });
+  assert.deepEqual(run.llmBodies()[2].thinking, { type: "enabled" });
+  assert.equal(run.llmBodies()[2].reasoning_effort, "low");
+});
+
 test("assistant content_json omits usage when the provider reported no token counts", async (t) => {
   // Stream without a usage chunk: pi-ai reports no usage, counts stay zero.
   const noUsageReply: LlmReply = { sse: sse(chunk({ role: "assistant", content: "no meters" }), chunk({}, "stop")) };
