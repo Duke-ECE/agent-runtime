@@ -33,6 +33,7 @@ export interface TranscriptLlm {
   api_key: string;
   base_url: string;
   model: string;
+  thinking_mode?: string;
 }
 
 /** Outcome of hydrating a durable transcript. */
@@ -98,6 +99,7 @@ function parseConfigTurn(turn: TranscriptTurn): TranscriptLlm | undefined {
     api_key: typeof record.api_key === "string" ? record.api_key : "",
     base_url: typeof record.base_url === "string" ? record.base_url : "",
     model: typeof record.model === "string" ? record.model : "",
+    ...(typeof record.thinking_mode === "string" ? { thinking_mode: record.thinking_mode } : {}),
   };
 }
 

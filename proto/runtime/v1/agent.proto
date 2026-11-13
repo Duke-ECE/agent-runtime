@@ -31,6 +31,7 @@ message LlmConfig {
   string api_key = 1;
   string base_url = 2;  // e.g. "https://api.openai.com/v1"
   string model = 3;     // e.g. "gpt-4o-mini"
+  string thinking_mode = 4;  // off|low|high|max|provider_default; empty = legacy default
 }
 
 message CreateSessionResponse {

@@ -63,11 +63,13 @@ model) wins; anything absent falls back to `LLM_API_KEY` / `LLM_BASE_URL` /
 `LLM_MODEL` env vars. Once a session has started, though, its LLM triple is
 **frozen**: see the config-turn paragraph below.
 
-For `deepseek-flash` on the official `api.deepseek.com` endpoint, the runtime
-adds `thinking: {"type":"disabled"}` to each OpenAI-compatible request.
-DeepSeek otherwise defaults to high-effort thinking, while this runtime only
-streams final answer text. Other models and endpoints keep their existing
-request behavior. The public API and CLI do not expose a thinking setting.
+The session's `thinking_mode` is `off`, `low`, `high`, `max`, or
+`provider_default`. For `deepseek-flash` on official `api.deepseek.com`, an
+absent mode keeps the compatibility default of `off`. Explicit `off` sends
+`thinking: {"type":"disabled"}`; `low`/`high`/`max` send enabled thinking
+and matching `reasoning_effort`; `provider_default` leaves both parameters
+absent. Other endpoints accept only `provider_default` or an absent mode.
+The chat stream contains final answer text, not reasoning content.
 
 `CreateSession` also accepts an optional `system_prompt` (empty = no system
 prompt — the runtime carries no built-in default; the platform's "Default
@@ -87,8 +89,8 @@ was deleted keeps its persona from the transcript. Hydration seeds the
 unchanged prompt is not re-recorded; system turns never become pi conversation
 messages (the last one wins, malformed ones are skipped with a warning).
 
-The session's resolved LLM triple is likewise persisted, as `role: "config"`
-messages (content_json `{"llm": {"api_key": ..., "base_url": ..., "model": ...}}`,
+The session's resolved LLM configuration is likewise persisted, as `role: "config"`
+messages (content_json `{"llm": {"api_key": ..., "base_url": ..., "model": ..., "thinking_mode": ...}}`,
 recorded faithfully as-is — `api_key` may be `""` when no key was resolved):
 the first `AppendTurn` that finds no matching config turn recorded prepends
 one, after the system message (if any) and before the user message. Resume

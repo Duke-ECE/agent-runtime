@@ -8,7 +8,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "sync-proto": "curl -fsSL https://raw.githubusercontent.com/Duke-ECE/protos/v0.9.1/proto/runtime/v1/agent.proto -o proto/runtime/v1/agent.proto && curl -fsSL https://raw.githubusercontent.com/Duke-ECE/protos/v0.9.1/proto/session/v1/session.proto -o proto/session/v1/session.proto && mkdir -p proto/sandbox/v3 && curl -fsSL https://raw.githubusercontent.com/Duke-ECE/protos/v0.9.1/proto/sandbox/v3/session_sandbox.proto -o proto/sandbox/v3/session_sandbox.proto",
+    "sync-proto": "curl -fsSL https://raw.githubusercontent.com/Duke-ECE/protos/v0.9.2/proto/runtime/v1/agent.proto -o proto/runtime/v1/agent.proto && curl -fsSL https://raw.githubusercontent.com/Duke-ECE/protos/v0.9.2/proto/session/v1/session.proto -o proto/session/v1/session.proto && mkdir -p proto/sandbox/v3 && curl -fsSL https://raw.githubusercontent.com/Duke-ECE/protos/v0.9.2/proto/sandbox/v3/session_sandbox.proto -o proto/sandbox/v3/session_sandbox.proto",
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test \"dist/test/*.test.js\"",
     "start": "node dist/src/server.js"

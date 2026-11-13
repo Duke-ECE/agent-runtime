@@ -6,7 +6,7 @@ import * as protoLoader from "@grpc/proto-loader";
 import { loadConfig, type ServiceConfig } from "./config.js";
 import { CubeToolExecutor } from "./cube-executor.js";
 import { extractTranscriptLlm, extractTranscriptSystemPrompt, transcriptToMessages } from "./hydrate.js";
-import { createModel, createStreamFn, type SessionLlmConfig } from "./llm.js";
+import { createModel, createStreamFn, resolveThinkingMode, type SessionLlmConfig } from "./llm.js";
 import { createSessionClient, type TranscriptTurn, type TurnMessageInput } from "./session-client.js";
 import { SessionManager, assertOwner, grpcError } from "./session-manager.js";
 import { generateTitle, sanitizeTitle, type TitleGenerator } from "./title.js";
@@ -108,11 +108,12 @@ export function createRuntime(
   });
   const sessionClient = createSessionClient(config);
 
-  function resolveLlm(req: { api_key?: string; base_url?: string; model?: string } | undefined): SessionLlmConfig {
+  function resolveLlm(req: { api_key?: string; base_url?: string; model?: string; thinking_mode?: string } | undefined): SessionLlmConfig {
     return {
       apiKey: req?.api_key || config.llm.apiKey,
       baseUrl: req?.base_url || config.llm.baseUrl,
       model: req?.model || config.llm.model,
+      thinkingMode: req?.thinking_mode,
     };
   }
 
@@ -132,7 +133,7 @@ export function createRuntime(
       const { user_id, session_id, llm, system_prompt, tools: toolNames } = call.request as {
         user_id?: string;
         session_id?: string;
-        llm?: { api_key?: string; base_url?: string; model?: string };
+        llm?: { api_key?: string; base_url?: string; model?: string; thinking_mode?: string };
         system_prompt?: string;
         tools?: string[];
       };
@@ -225,8 +226,15 @@ export function createRuntime(
         const frozenLlm = markerTurns ? extractTranscriptLlm(markerTurns) : undefined;
         const resolved: SessionLlmConfig =
           frozenLlm && frozenLlm.api_key
-            ? { apiKey: frozenLlm.api_key, baseUrl: frozenLlm.base_url, model: frozenLlm.model }
+            ? { apiKey: frozenLlm.api_key, baseUrl: frozenLlm.base_url, model: frozenLlm.model,
+                thinkingMode: frozenLlm.thinking_mode || llm?.thinking_mode }
             : resolveLlm(llm);
+        try {
+          resolved.thinkingMode = resolveThinkingMode(resolved);
+        } catch (err) {
+          callback(grpcError(grpc.status.INVALID_ARGUMENT, (err as Error).message) as grpc.ServiceError, null);
+          return;
+        }
         const model = createModel(resolved);
         // Convert the fetched transcript WINDOW into pi messages, stamped
         // with the resolved model's identity, so it can seed
@@ -439,6 +447,7 @@ export function createRuntime(
               api_key: session.agent.llm.apiKey ?? "",
               base_url: session.agent.llm.baseUrl,
               model: session.agent.llm.model,
+              thinking_mode: session.agent.llm.thinkingMode,
             };
             const llmJson = JSON.stringify(llmSnapshot);
             if (llmJson !== session.agent.lastRecordedLlm) {
