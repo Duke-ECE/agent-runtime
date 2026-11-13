@@ -42,9 +42,23 @@ export function createModel(config: SessionLlmConfig): Model<"openai-completions
  * completions streaming, injecting the session's API key on every call.
  */
 export function createStreamFn(config: SessionLlmConfig): StreamFn {
+  const disableDeepSeekThinking =
+    URL.canParse(config.baseUrl) &&
+    new URL(config.baseUrl).hostname === "api.deepseek.com" &&
+    config.model === "deepseek-flash";
   return (model, context, options) =>
     openAiCompletionsStreamSimple(model as Model<"openai-completions">, context, {
       ...options,
       apiKey: config.apiKey,
+      // DeepSeek Flash defaults to high-effort thinking. Our Chat contract
+      // exposes only answer text, so explicitly disable it for this endpoint.
+      // Preserve a caller-supplied payload hook and an explicit thinking value.
+      onPayload: disableDeepSeekThinking
+        ? async (payload, selectedModel) => {
+            const customized = (await options?.onPayload?.(payload, selectedModel)) ?? payload;
+            if (typeof customized !== "object" || customized === null || "thinking" in customized) return customized;
+            return { ...customized, thinking: { type: "disabled" } };
+          }
+        : options?.onPayload,
     });
 }
