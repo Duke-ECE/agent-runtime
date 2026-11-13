@@ -164,6 +164,7 @@ export function createRuntime(
         // history.
         let transcriptTurns: TranscriptTurn[] | undefined;
         let transcriptHasMore = false;
+        let transcriptReadSucceeded = false;
         if (session_id && sessionClient) {
           try {
             // Windowed hydration: fetch only the latest HYDRATION_MAX_TURNS
@@ -178,6 +179,7 @@ export function createRuntime(
               limit: config.hydrationMaxTurns,
               beforeSeq: 0,
             });
+            transcriptReadSucceeded = transcript !== null;
             if (transcript && transcript.messages.length > 0) {
               transcriptTurns = transcript.messages;
               transcriptHasMore = transcript.hasMore;
@@ -234,6 +236,23 @@ export function createRuntime(
         } catch (err) {
           callback(grpcError(grpc.status.INVALID_ARGUMENT, (err as Error).message) as grpc.ServiceError, null);
           return;
+        }
+        const deepSeekThinking = resolved.thinkingMode !== "off" && resolved.model === "deepseek-flash" &&
+          URL.canParse(resolved.baseUrl) && new URL(resolved.baseUrl).hostname === "api.deepseek.com";
+        if (deepSeekThinking && session_id && sessionClient && !transcriptReadSucceeded) {
+          callback(grpcError(grpc.status.UNAVAILABLE, "thinking history unavailable") as grpc.ServiceError, null);
+          return;
+        }
+        // Exact private message rows may sit outside the latest window. A
+        // thinking-enabled resume needs complete tool/reasoning continuity.
+        if (transcriptHasMore && sessionClient && session_id && deepSeekThinking) {
+          const full = await sessionClient.getTranscript(session_id);
+          if (!full) {
+            callback(grpcError(grpc.status.UNAVAILABLE, "full thinking history recovery failed") as grpc.ServiceError, null);
+            return;
+          }
+          transcriptTurns = full.messages;
+          markerTurns = full.messages;
         }
         const model = createModel(resolved);
         // Convert the fetched transcript WINDOW into pi messages, stamped
@@ -359,6 +378,7 @@ export function createRuntime(
         return;
       }
       sessions.touch(session.id);
+      const initialMessageCount = agent.state.messages.length;
 
       let inputTokens = 0;
       let outputTokens = 0;
@@ -469,6 +489,17 @@ export function createRuntime(
               turn.push({ role: "assistant", contentJson: JSON.stringify(payload), createdAt: now });
             }
             turn.push(...toolMessages);
+            // Preserve provider messages (including reasoning_content and
+            // tool-call order) for token-only hydration. Owner transcript
+            // reads redact every agent_state payload in session-manager.
+            if (llm.thinkingMode !== "off" && llm.model === "deepseek-flash" &&
+                URL.canParse(llm.baseUrl) && new URL(llm.baseUrl).hostname === "api.deepseek.com") {
+              for (const message of agent.state.messages.slice(initialMessageCount)) {
+                if (message.role === "assistant" || message.role === "toolResult") {
+                  turn.push({ role: "agent_state", contentJson: JSON.stringify({ message }), createdAt: now });
+                }
+              }
+            }
             sessionClient?.appendTurn(session.id, session.userId, turn);
             // Auto session title: only the first completed turn of a session
             // that began empty. Fire-and-log — detached from the chat stream,

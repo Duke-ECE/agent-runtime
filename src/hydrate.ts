@@ -172,6 +172,16 @@ export function transcriptToMessages(turns: TranscriptTurn[], opts: HydrateOptio
   const messages: AgentMessage[] = [];
   let systemPrompt = "";
   let llm: TranscriptLlm = { api_key: "", base_url: "", model: "" };
+  // A newer transcript can contain private exact pi messages alongside the
+  // legacy display rows. Prefer them within each user turn so tool order and
+  // provider reasoning survive a restart. Older turns keep legacy hydration.
+  const hasPrivateStateAhead = (start: number): boolean => {
+    for (let j = start; j < turns.length && turns[j].role !== "user"; j++) {
+      if (turns[j].role === "agent_state") return true;
+    }
+    return false;
+  };
+  let usePrivateState = hasPrivateStateAhead(0);
   for (let i = 0; i < turns.length; i++) {
     const turn = turns[i];
     const timestamp = toTimestamp(turn.createdAt);
@@ -188,6 +198,7 @@ export function transcriptToMessages(turns: TranscriptTurn[], opts: HydrateOptio
         break;
       }
       case "user": {
+        usePrivateState = hasPrivateStateAhead(i + 1);
         const text = textPayload(turn);
         if (text === undefined) break;
         const message: UserMessage = { role: "user", content: [{ type: "text", text }], timestamp };
@@ -195,6 +206,7 @@ export function transcriptToMessages(turns: TranscriptTurn[], opts: HydrateOptio
         break;
       }
       case "assistant": {
+        if (usePrivateState) break;
         const text = textPayload(turn);
         if (text === undefined) break;
         const message: AssistantMessage = {
@@ -211,6 +223,7 @@ export function transcriptToMessages(turns: TranscriptTurn[], opts: HydrateOptio
         break;
       }
       case "tool_call": {
+        if (usePrivateState) break;
         const payload = parsePayload(turn);
         if (!payload) break;
         const name = payload.tool;
@@ -259,8 +272,20 @@ export function transcriptToMessages(turns: TranscriptTurn[], opts: HydrateOptio
         break;
       }
       case "tool_result":
+        if (usePrivateState) break;
         console.warn(`hydration: skipping orphan tool_result seq=${turn.seq}`);
         break;
+      case "agent_state": {
+        const payload = parsePayload(turn);
+        const message = payload?.message;
+        if (message && typeof message === "object" && !Array.isArray(message)) {
+          const m = message as Record<string, unknown>;
+          if ((m.role === "assistant" || m.role === "toolResult") && Array.isArray(m.content)) {
+            messages.push(message as AgentMessage);
+          }
+        }
+        break;
+      }
       default:
         console.warn(`hydration: skipping unknown role ${turn.role} (seq=${turn.seq})`);
         break;
