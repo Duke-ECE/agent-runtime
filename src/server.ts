@@ -6,7 +6,8 @@ import * as protoLoader from "@grpc/proto-loader";
 import { loadConfig, type ServiceConfig } from "./config.js";
 import { CubeToolExecutor } from "./cube-executor.js";
 import { extractTranscriptLlm, extractTranscriptSystemPrompt, transcriptToMessages } from "./hydrate.js";
-import { createModel, createStreamFn, type SessionLlmConfig } from "./llm.js";
+import { loadCompleteTranscript } from "./history.js";
+import { createModel, createStreamFn, resolveThinkingMode, type SessionLlmConfig } from "./llm.js";
 import { createSessionClient, type TranscriptTurn, type TurnMessageInput } from "./session-client.js";
 import { SessionManager, assertOwner, grpcError } from "./session-manager.js";
 import { generateTitle, sanitizeTitle, type TitleGenerator } from "./title.js";
@@ -16,6 +17,7 @@ interface RuntimeSession {
   sessionId: string;
   agent: Agent;
   llm: SessionLlmConfig;
+  turnThinkingMode: { value?: "off" };
   /** True until the first completed Chat turn has been offered a generated title. */
   titlePending: boolean;
   /**
@@ -108,11 +110,12 @@ export function createRuntime(
   });
   const sessionClient = createSessionClient(config);
 
-  function resolveLlm(req: { api_key?: string; base_url?: string; model?: string } | undefined): SessionLlmConfig {
+  function resolveLlm(req: { api_key?: string; base_url?: string; model?: string; thinking_mode?: string } | undefined): SessionLlmConfig {
     return {
       apiKey: req?.api_key || config.llm.apiKey,
       baseUrl: req?.base_url || config.llm.baseUrl,
       model: req?.model || config.llm.model,
+      thinkingMode: req?.thinking_mode,
     };
   }
 
@@ -132,7 +135,7 @@ export function createRuntime(
       const { user_id, session_id, llm, system_prompt, tools: toolNames } = call.request as {
         user_id?: string;
         session_id?: string;
-        llm?: { api_key?: string; base_url?: string; model?: string };
+        llm?: { api_key?: string; base_url?: string; model?: string; thinking_mode?: string };
         system_prompt?: string;
         tools?: string[];
       };
@@ -163,6 +166,7 @@ export function createRuntime(
         // history.
         let transcriptTurns: TranscriptTurn[] | undefined;
         let transcriptHasMore = false;
+        let transcriptReadSucceeded = false;
         if (session_id && sessionClient) {
           try {
             // Windowed hydration: fetch only the latest HYDRATION_MAX_TURNS
@@ -177,6 +181,7 @@ export function createRuntime(
               limit: config.hydrationMaxTurns,
               beforeSeq: 0,
             });
+            transcriptReadSucceeded = transcript !== null;
             if (transcript && transcript.messages.length > 0) {
               transcriptTurns = transcript.messages;
               transcriptHasMore = transcript.hasMore;
@@ -184,6 +189,22 @@ export function createRuntime(
           } catch (err) {
             console.warn(`hydration failed for ${session_id}, starting with empty history:`, err);
           }
+        }
+        // Thinking with tools needs exact provider messages from every prior
+        // turn. Fetch the full history in bounded pages before resolving the
+        // frozen config when the request already identifies that mode.
+        const requestNeedsThinkingHistory = llm?.thinking_mode && llm.thinking_mode !== "off" &&
+          (llm.thinking_mode !== "provider_default" ||
+            (llm.model === "deepseek-flash" && URL.canParse(llm.base_url ?? "") &&
+              new URL(llm.base_url ?? "").hostname === "api.deepseek.com"));
+        if (transcriptHasMore && session_id && sessionClient && requestNeedsThinkingHistory) {
+          const full = await loadCompleteTranscript(sessionClient, session_id);
+          if (!full) {
+            callback(grpcError(grpc.status.UNAVAILABLE, "full thinking history recovery failed") as grpc.ServiceError, null);
+            return;
+          }
+          transcriptTurns = full;
+          transcriptHasMore = false;
         }
         // Marker recovery: system/config turns are written at the head of
         // the transcript (and only when they change), so a long session's
@@ -225,8 +246,33 @@ export function createRuntime(
         const frozenLlm = markerTurns ? extractTranscriptLlm(markerTurns) : undefined;
         const resolved: SessionLlmConfig =
           frozenLlm && frozenLlm.api_key
-            ? { apiKey: frozenLlm.api_key, baseUrl: frozenLlm.base_url, model: frozenLlm.model }
+            ? { apiKey: frozenLlm.api_key, baseUrl: frozenLlm.base_url, model: frozenLlm.model,
+                thinkingMode: frozenLlm.thinking_mode || llm?.thinking_mode }
             : resolveLlm(llm);
+        try {
+          resolved.thinkingMode = resolveThinkingMode(resolved);
+        } catch (err) {
+          callback(grpcError(grpc.status.INVALID_ARGUMENT, (err as Error).message) as grpc.ServiceError, null);
+          return;
+        }
+        const deepSeekThinking = resolved.thinkingMode !== "off" && resolved.model === "deepseek-flash" &&
+          URL.canParse(resolved.baseUrl) && new URL(resolved.baseUrl).hostname === "api.deepseek.com";
+        if (deepSeekThinking && session_id && sessionClient && !transcriptReadSucceeded) {
+          callback(grpcError(grpc.status.UNAVAILABLE, "thinking history unavailable") as grpc.ServiceError, null);
+          return;
+        }
+        // Exact private message rows may sit outside the latest window. A
+        // thinking-enabled resume needs complete tool/reasoning continuity.
+        if (transcriptHasMore && sessionClient && session_id && deepSeekThinking) {
+          const full = await loadCompleteTranscript(sessionClient, session_id);
+          if (!full) {
+            callback(grpcError(grpc.status.UNAVAILABLE, "full thinking history recovery failed") as grpc.ServiceError, null);
+            return;
+          }
+          transcriptTurns = full;
+          markerTurns = full;
+          transcriptHasMore = false;
+        }
         const model = createModel(resolved);
         // Convert the fetched transcript WINDOW into pi messages, stamped
         // with the resolved model's identity, so it can seed
@@ -260,30 +306,34 @@ export function createRuntime(
         const systemPrompt = system_prompt || transcriptSystemPrompt;
         const session = sessions.create(
           user_id,
-          (sessionId) => ({
-            sessionId,
-            llm: resolved,
-            // Only a session that began empty gets an auto title after its
-            // first completed turn; hydrated/history-seeded sessions don't.
-            titlePending: !history,
-            systemPrompt,
-            // Seed the "last recorded" markers from the transcript so an
-            // unchanged prompt/triple is not re-recorded on the next
-            // AppendTurn. A transcript without a config turn leaves the LLM
-            // marker undefined, so the first AppendTurn records the triple.
-            lastRecordedSystemPrompt: transcriptSystemPrompt || undefined,
-            lastRecordedLlm: frozenLlm ? JSON.stringify(frozenLlm) : undefined,
-            agent: new Agent({
-              initialState: {
-                systemPrompt,
-                model,
-                tools: buildTools(executor, sessionId).filter((tool) => !toolNames || toolNames.length === 0 || toolNames.includes(tool.name)),
-                ...(history ? { messages: history } : {}),
-              },
-              streamFn: createStreamFn(resolved),
+          (sessionId) => {
+            const turnThinkingMode: { value?: "off" } = {};
+            return {
               sessionId,
-            }),
-          }),
+              llm: resolved,
+              turnThinkingMode,
+              // Only a session that began empty gets an auto title after its
+              // first completed turn; hydrated/history-seeded sessions don't.
+              titlePending: !history,
+              systemPrompt,
+              // Seed the "last recorded" markers from the transcript so an
+              // unchanged prompt/triple is not re-recorded on the next
+              // AppendTurn. A transcript without a config turn leaves the LLM
+              // marker undefined, so the first AppendTurn records the triple.
+              lastRecordedSystemPrompt: transcriptSystemPrompt || undefined,
+              lastRecordedLlm: frozenLlm ? JSON.stringify(frozenLlm) : undefined,
+              agent: new Agent({
+                initialState: {
+                  systemPrompt,
+                  model,
+                  tools: buildTools(executor, sessionId).filter((tool) => !toolNames || toolNames.length === 0 || toolNames.includes(tool.name)),
+                  ...(history ? { messages: history } : {}),
+                },
+                streamFn: createStreamFn(resolved, () => turnThinkingMode.value),
+                sessionId,
+              }),
+            };
+          },
           session_id || undefined,
         );
         callback(null, { session_id: session.id });
@@ -319,10 +369,11 @@ export function createRuntime(
     },
 
     chat(call: grpc.ServerWritableStream<any, any>) {
-      const { session_id, content, user_id } = call.request as {
+      const { session_id, content, user_id, thinking_mode } = call.request as {
         session_id?: string;
         content?: string;
         user_id?: string;
+        thinking_mode?: string;
       };
       let session;
       try {
@@ -333,6 +384,15 @@ export function createRuntime(
         return;
       }
       const { agent, llm } = session.agent;
+      if (thinking_mode && thinking_mode !== "off") {
+        failStream(call, grpcError(grpc.status.INVALID_ARGUMENT, "only thinking_mode off is supported per turn"));
+        return;
+      }
+      if (thinking_mode === "off" && llm.thinkingMode !== "off" &&
+          !(llm.model === "deepseek-flash" && URL.canParse(llm.baseUrl) && new URL(llm.baseUrl).hostname === "api.deepseek.com")) {
+        failStream(call, grpcError(grpc.status.INVALID_ARGUMENT, "thinking_mode off is not supported for this model"));
+        return;
+      }
       if (agent.state.isStreaming) {
         failStream(
           call,
@@ -351,6 +411,8 @@ export function createRuntime(
         return;
       }
       sessions.touch(session.id);
+      session.agent.turnThinkingMode.value = thinking_mode === "off" ? "off" : undefined;
+      const initialMessageCount = agent.state.messages.length;
 
       let inputTokens = 0;
       let outputTokens = 0;
@@ -439,6 +501,7 @@ export function createRuntime(
               api_key: session.agent.llm.apiKey ?? "",
               base_url: session.agent.llm.baseUrl,
               model: session.agent.llm.model,
+              thinking_mode: session.agent.llm.thinkingMode,
             };
             const llmJson = JSON.stringify(llmSnapshot);
             if (llmJson !== session.agent.lastRecordedLlm) {
@@ -460,6 +523,17 @@ export function createRuntime(
               turn.push({ role: "assistant", contentJson: JSON.stringify(payload), createdAt: now });
             }
             turn.push(...toolMessages);
+            // Preserve provider messages (including reasoning_content and
+            // tool-call order) for token-only hydration. Owner transcript
+            // reads redact every agent_state payload in session-manager.
+            if (llm.thinkingMode !== "off" && llm.model === "deepseek-flash" &&
+                URL.canParse(llm.baseUrl) && new URL(llm.baseUrl).hostname === "api.deepseek.com") {
+              for (const message of agent.state.messages.slice(initialMessageCount)) {
+                if (message.role === "assistant" || message.role === "toolResult") {
+                  turn.push({ role: "agent_state", contentJson: JSON.stringify({ message }), createdAt: now });
+                }
+              }
+            }
             sessionClient?.appendTurn(session.id, session.userId, turn);
             // Auto session title: only the first completed turn of a session
             // that began empty. Fire-and-log — detached from the chat stream,
@@ -495,6 +569,7 @@ export function createRuntime(
           }
         })
         .finally(() => {
+          session.agent.turnThinkingMode.value = undefined;
           unsubscribe();
           sessions.touch(session.id);
         });

@@ -69,6 +69,39 @@ test("tool_call pairs with the following tool_result of the same tool", () => {
   assert.equal(result.timestamp, TS_MS);
 });
 
+test("private agent state restores reasoning and exact tool order", () => {
+  const toolAssistant: AssistantMessage = {
+    role: "assistant", content: [
+      { type: "thinking", thinking: "private plan", thinkingSignature: "reasoning_content" },
+      { type: "toolCall", id: "real-call", name: "bash", arguments: { command: "pwd" } },
+    ], api: OPTS.api, provider: OPTS.provider, model: OPTS.model,
+    usage: ZERO_USAGE, stopReason: "toolUse", timestamp: TS_MS,
+  };
+  const result: ToolResultMessage = {
+    role: "toolResult", toolCallId: "real-call", toolName: "bash",
+    content: [{ type: "text", text: "/tmp" }], isError: false, timestamp: TS_MS,
+  };
+  const final: AssistantMessage = {
+    ...toolAssistant, content: [
+      { type: "thinking", thinking: "respond now", thinkingSignature: "reasoning_content" },
+      { type: "text", text: "done" },
+    ], stopReason: "stop",
+  };
+  const { messages } = transcriptToMessages([
+    turn(1, "user", { content: "go" }),
+    turn(2, "assistant", { content: "done" }),
+    turn(3, "tool_call", { tool: "bash", arguments_json: '{"command":"pwd"}' }),
+    turn(4, "tool_result", { tool: "bash", ok: true, output: "/tmp" }),
+    turn(5, "agent_state", { message: toolAssistant }),
+    turn(6, "agent_state", { message: result }),
+    turn(7, "agent_state", { message: final }),
+  ], OPTS);
+  assert.deepEqual(messages, [
+    { role: "user", content: [{ type: "text", text: "go" }], timestamp: TS_MS },
+    toolAssistant, result, final,
+  ]);
+});
+
 test("failed tool_result hydrates as isError, error text preferred over output", () => {
   const withError = transcriptToMessages(
     [

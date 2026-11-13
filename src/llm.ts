@@ -11,6 +11,27 @@ export interface SessionLlmConfig {
   apiKey?: string;
   baseUrl: string;
   model: string;
+  thinkingMode?: string;
+}
+
+export type ThinkingMode = "off" | "low" | "high" | "max" | "provider_default";
+
+function isDeepSeekFlash(config: SessionLlmConfig): boolean {
+  return URL.canParse(config.baseUrl) &&
+    new URL(config.baseUrl).hostname === "api.deepseek.com" &&
+    config.model === "deepseek-flash";
+}
+
+/** Resolve legacy requests and reject explicit modes unsupported by this adapter. */
+export function resolveThinkingMode(config: SessionLlmConfig): ThinkingMode {
+  const mode = config.thinkingMode || (isDeepSeekFlash(config) ? "off" : "provider_default");
+  if (mode !== "off" && mode !== "low" && mode !== "high" && mode !== "max" && mode !== "provider_default") {
+    throw new Error(`invalid thinking_mode: ${mode}`);
+  }
+  if (mode !== "provider_default" && !isDeepSeekFlash(config)) {
+    throw new Error(`thinking_mode ${mode} is not supported for model ${config.model}`);
+  }
+  return mode;
 }
 
 /**
@@ -41,24 +62,24 @@ export function createModel(config: SessionLlmConfig): Model<"openai-completions
  * Stream function for the pi Agent loop: delegates to pi-ai's OpenAI chat
  * completions streaming, injecting the session's API key on every call.
  */
-export function createStreamFn(config: SessionLlmConfig): StreamFn {
-  const disableDeepSeekThinking =
-    URL.canParse(config.baseUrl) &&
-    new URL(config.baseUrl).hostname === "api.deepseek.com" &&
-    config.model === "deepseek-flash";
-  return (model, context, options) =>
-    openAiCompletionsStreamSimple(model as Model<"openai-completions">, context, {
+export function createStreamFn(config: SessionLlmConfig, turnOverride?: () => "off" | undefined): StreamFn {
+  return (model, context, options) => {
+    // Resolve on every provider call so tool follow-ups share the active
+    // turn override. Clearing the override restores the frozen session mode.
+    const thinkingMode = resolveThinkingMode({ ...config, thinkingMode: turnOverride?.() ?? config.thinkingMode });
+    return openAiCompletionsStreamSimple(model as Model<"openai-completions">, context, {
       ...options,
       apiKey: config.apiKey,
-      // DeepSeek Flash defaults to high-effort thinking. Our Chat contract
-      // exposes only answer text, so explicitly disable it for this endpoint.
-      // Preserve a caller-supplied payload hook and an explicit thinking value.
-      onPayload: disableDeepSeekThinking
+      // provider_default leaves the provider payload untouched.
+      onPayload: thinkingMode !== "provider_default"
         ? async (payload, selectedModel) => {
             const customized = (await options?.onPayload?.(payload, selectedModel)) ?? payload;
             if (typeof customized !== "object" || customized === null || "thinking" in customized) return customized;
-            return { ...customized, thinking: { type: "disabled" } };
+            return thinkingMode === "off"
+              ? { ...customized, thinking: { type: "disabled" } }
+              : { ...customized, thinking: { type: "enabled" }, reasoning_effort: thinkingMode };
           }
         : options?.onPayload,
     });
+  };
 }
