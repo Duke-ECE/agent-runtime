@@ -75,16 +75,33 @@ function toolCallReply(): LlmReply {
   };
 }
 
+function thinkingToolCallReply(): LlmReply {
+  return {
+    sse: sse(
+      chunk({ role: "assistant", reasoning_content: "inspect files first" }),
+      chunk({ tool_calls: [
+        { index: 0, id: "call_1", type: "function", function: { name: "bash", arguments: '{"command":"ls"}' } },
+      ] }),
+      chunk({}, "tool_calls", USAGE),
+    ),
+  };
+}
+
 /** Serves scripted streaming chat-completions responses; script gets the 1-based request index. */
 async function startFakeLlm(script: (requestIndex: number) => LlmReply): Promise<{
   url: string;
   requests: () => number;
+  bodies: () => any[];
   close: () => Promise<void>;
 }> {
   let requests = 0;
+  const bodies: any[] = [];
   const server: HttpServer = createServer((req, res) => {
-    req.resume();
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (part) => (body += part));
     req.on("end", () => {
+      bodies.push(JSON.parse(body));
       const reply = script(++requests);
       if ("status" in reply) {
         res.writeHead(reply.status, { "content-type": "application/json" });
@@ -100,6 +117,7 @@ async function startFakeLlm(script: (requestIndex: number) => LlmReply): Promise
   return {
     url: `http://127.0.0.1:${port}/v1`,
     requests: () => requests,
+    bodies: () => bodies,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }
@@ -113,7 +131,7 @@ interface AppendCall {
   token?: string;
 }
 
-async function startFakeSessionManager(): Promise<{
+async function startFakeSessionManager(transcript: AppendCall["messages"] = []): Promise<{
   addr: string;
   appends: AppendCall[];
   close: () => Promise<void>;
@@ -128,7 +146,9 @@ async function startFakeSessionManager(): Promise<{
     getSession: unimplemented,
     listSessions: unimplemented,
     endSession: unimplemented,
-    getTranscript: unimplemented,
+    getTranscript(_call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) {
+      callback(null, { messages: transcript });
+    },
     appendTurn(call: grpc.ServerUnaryCall<any, any>, callback: grpc.sendUnaryData<any>) {
       const token = call.metadata.get("x-service-token")[0];
       appends.push({ ...call.request, token: typeof token === "string" ? token : undefined });
@@ -152,10 +172,22 @@ async function startFakeSessionManager(): Promise<{
 async function setup(
   t: import("node:test").TestContext,
   script: (requestIndex: number) => LlmReply,
-  opts: { withSessionManager: boolean },
-): Promise<{ chat: (req: unknown) => Promise<any[]>; sessionId: string; appends: AppendCall[] }> {
+  opts: { withSessionManager: boolean; deepSeekThinking?: boolean; sessionId?: string; transcript?: AppendCall["messages"] },
+): Promise<{ chat: (req: unknown) => Promise<any[]>; sessionId: string; appends: AppendCall[]; llmBodies: () => any[] }> {
   const llm = await startFakeLlm(script);
-  const sessionManager = opts.withSessionManager ? await startFakeSessionManager() : undefined;
+  if (opts.deepSeekThinking) {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (input, init) => {
+      const originalURL = new URL(input instanceof Request ? input.url : String(input));
+      if (originalURL.hostname === "api.deepseek.com") {
+        const target = new URL(originalURL.pathname + originalURL.search, llm.url);
+        return originalFetch(new Request(target, input instanceof Request ? input : init));
+      }
+      return originalFetch(input, init);
+    };
+    t.after(() => { globalThis.fetch = originalFetch; });
+  }
+  const sessionManager = opts.withSessionManager ? await startFakeSessionManager(opts.transcript) : undefined;
 
   const config: ServiceConfig = {
     port: 0,
@@ -166,7 +198,7 @@ async function setup(
     serviceToken: opts.withSessionManager ? "test-token" : undefined,
     hydrationMaxTurns: 50,
   };
-  const { server } = createRuntime(config);
+  const { server } = createRuntime(config, undefined, opts.deepSeekThinking ? { titleGenerator: () => Promise.resolve("") } : {});
   const port = await new Promise<number>((resolve, reject) => {
     server.bindAsync("127.0.0.1:0", grpc.ServerCredentials.createInsecure(), (err, p) =>
       err ? reject(err) : resolve(p),
@@ -183,7 +215,9 @@ async function setup(
   });
 
   const session = (await new Promise<{ session_id: string }>((resolve, reject) => {
-    raw.createSession({ user_id: "alice" }, (err: grpc.ServiceError | null, res: { session_id: string }) =>
+    raw.createSession({ user_id: "alice", ...(opts.sessionId ? { session_id: opts.sessionId } : {}), ...(opts.deepSeekThinking ? {
+      llm: { api_key: "test-key", base_url: "https://api.deepseek.com", model: "deepseek-flash", thinking_mode: "low" },
+    } : {}) }, (err: grpc.ServiceError | null, res: { session_id: string }) =>
       err ? reject(err) : resolve(res),
     );
   }));
@@ -197,7 +231,7 @@ async function setup(
         .on("error", reject);
     });
 
-  return { chat, sessionId: session.session_id, appends: sessionManager?.appends ?? [] };
+  return { chat, sessionId: session.session_id, appends: sessionManager?.appends ?? [], llmBodies: llm.bodies };
 }
 
 async function waitFor(cond: () => boolean, timeoutMs = 2_000): Promise<void> {
@@ -271,6 +305,39 @@ test("tool events are recorded as tool_call/tool_result messages", async (t) => 
     output: "",
     error: SANDBOX_NOT_CONNECTED,
   });
+});
+
+test("DeepSeek thinking writes private exact messages with reasoning", async (t) => {
+  const { chat, sessionId, appends } = await setup(
+    t, (i) => i === 1 ? thinkingToolCallReply() : textReply("done"),
+    { withSessionManager: true, deepSeekThinking: true },
+  );
+  await chat({ session_id: sessionId, content: "list files", user_id: "alice" });
+  await waitFor(() => appends.length === 1);
+  const privateRows = appends[0].messages.filter((m) => m.role === "agent_state");
+  assert.ok(privateRows.length >= 2, "expected tool-call and final assistant state");
+  const toolAssistant = JSON.parse(privateRows[0].content_json).message;
+  assert.equal(toolAssistant.content[0].type, "thinking");
+  assert.equal(toolAssistant.content[0].thinking, "inspect files first");
+  assert.equal(toolAssistant.content[1].id, "call_1");
+});
+
+test("DeepSeek thinking resumes after restart with the original reasoning", async (t) => {
+  const first = await setup(t, (i) => i === 1 ? thinkingToolCallReply() : textReply("done"),
+    { withSessionManager: true, deepSeekThinking: true });
+  await first.chat({ session_id: first.sessionId, content: "list files", user_id: "alice" });
+  await waitFor(() => first.appends.length === 1);
+  const transcript = first.appends[0].messages.map((m, i) => ({ ...m, seq: i + 1 }));
+  const second = await setup(t, () => textReply("continued"), {
+    withSessionManager: true, deepSeekThinking: true,
+    sessionId: first.sessionId, transcript,
+  });
+  const events = await second.chat({ session_id: second.sessionId, content: "continue", user_id: "alice" });
+  assert.ok(events.some((event) => event.done));
+  const resumedRequest = second.llmBodies()[0];
+  const toolAssistant = resumedRequest.messages.find((m: any) => m.role === "assistant" && m.tool_calls);
+  assert.equal(toolAssistant.reasoning_content, "inspect files first");
+  assert.equal(toolAssistant.tool_calls[0].id, "call_1");
 });
 
 test("assistant content_json omits usage when the provider reported no token counts", async (t) => {

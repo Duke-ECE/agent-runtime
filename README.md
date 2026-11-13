@@ -119,7 +119,7 @@ records private `agent_state` rows with the exact provider assistant/tool
 messages. These keep `reasoning_content` and tool-call order intact across a
 runtime restart. Session-manager redacts their payloads on owner transcript
 reads; only the service-token hydration path receives them. A truncated
-thinking history is fetched in full before the agent resumes.
+thinking history is fetched in bounded pages before the agent resumes.
 
 ## Tools
 

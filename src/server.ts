@@ -6,6 +6,7 @@ import * as protoLoader from "@grpc/proto-loader";
 import { loadConfig, type ServiceConfig } from "./config.js";
 import { CubeToolExecutor } from "./cube-executor.js";
 import { extractTranscriptLlm, extractTranscriptSystemPrompt, transcriptToMessages } from "./hydrate.js";
+import { loadCompleteTranscript } from "./history.js";
 import { createModel, createStreamFn, resolveThinkingMode, type SessionLlmConfig } from "./llm.js";
 import { createSessionClient, type TranscriptTurn, type TurnMessageInput } from "./session-client.js";
 import { SessionManager, assertOwner, grpcError } from "./session-manager.js";
@@ -188,6 +189,22 @@ export function createRuntime(
             console.warn(`hydration failed for ${session_id}, starting with empty history:`, err);
           }
         }
+        // Thinking with tools needs exact provider messages from every prior
+        // turn. Fetch the full history in bounded pages before resolving the
+        // frozen config when the request already identifies that mode.
+        const requestNeedsThinkingHistory = llm?.thinking_mode && llm.thinking_mode !== "off" &&
+          (llm.thinking_mode !== "provider_default" ||
+            (llm.model === "deepseek-flash" && URL.canParse(llm.base_url ?? "") &&
+              new URL(llm.base_url ?? "").hostname === "api.deepseek.com"));
+        if (transcriptHasMore && session_id && sessionClient && requestNeedsThinkingHistory) {
+          const full = await loadCompleteTranscript(sessionClient, session_id);
+          if (!full) {
+            callback(grpcError(grpc.status.UNAVAILABLE, "full thinking history recovery failed") as grpc.ServiceError, null);
+            return;
+          }
+          transcriptTurns = full;
+          transcriptHasMore = false;
+        }
         // Marker recovery: system/config turns are written at the head of
         // the transcript (and only when they change), so a long session's
         // window may contain none — which would silently drop the frozen-LLM
@@ -246,13 +263,14 @@ export function createRuntime(
         // Exact private message rows may sit outside the latest window. A
         // thinking-enabled resume needs complete tool/reasoning continuity.
         if (transcriptHasMore && sessionClient && session_id && deepSeekThinking) {
-          const full = await sessionClient.getTranscript(session_id);
+          const full = await loadCompleteTranscript(sessionClient, session_id);
           if (!full) {
             callback(grpcError(grpc.status.UNAVAILABLE, "full thinking history recovery failed") as grpc.ServiceError, null);
             return;
           }
-          transcriptTurns = full.messages;
-          markerTurns = full.messages;
+          transcriptTurns = full;
+          markerTurns = full;
+          transcriptHasMore = false;
         }
         const model = createModel(resolved);
         // Convert the fetched transcript WINDOW into pi messages, stamped
