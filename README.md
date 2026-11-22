@@ -138,6 +138,10 @@ snapshot in the manager. If a tool RPC fails after execution starts, the turn
 is marked failed: no `done` event or completed transcript write is emitted,
 because workspace changes may not have been committed. The runtime never
 receives Cube credentials, R2 credentials, or Cube sandbox IDs.
+After a turn that changes files, the runtime asks the manager to checkpoint
+the sandbox before `done`. A failed or canceled turn closes the sandbox so the
+next turn restores the last committed workspace revision. Transcript
+`AppendTurn` is still fire-and-log; it is not atomic with the checkpoint.
 
 ## Environment variables
 

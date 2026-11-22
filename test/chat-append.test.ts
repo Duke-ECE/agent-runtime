@@ -8,7 +8,7 @@ import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { createRuntime } from "../src/server.js";
 import type { ServiceConfig } from "../src/config.js";
-import { SANDBOX_NOT_CONNECTED } from "../src/tools.js";
+import { SANDBOX_NOT_CONNECTED, type ToolExecutor } from "../src/tools.js";
 
 function resolveProtoPath(rel: string): string {
   for (const base of ["../../", "../"]) {
@@ -172,7 +172,7 @@ async function startFakeSessionManager(transcript: AppendCall["messages"] = []):
 async function setup(
   t: import("node:test").TestContext,
   script: (requestIndex: number) => LlmReply,
-  opts: { withSessionManager: boolean; deepSeekThinking?: boolean; sessionId?: string; transcript?: AppendCall["messages"] },
+  opts: { withSessionManager: boolean; deepSeekThinking?: boolean; sessionId?: string; transcript?: AppendCall["messages"]; executor?: ToolExecutor },
 ): Promise<{ chat: (req: unknown) => Promise<any[]>; sessionId: string; appends: AppendCall[]; llmBodies: () => any[] }> {
   const llm = await startFakeLlm(script);
   if (opts.deepSeekThinking) {
@@ -198,7 +198,7 @@ async function setup(
     serviceToken: opts.withSessionManager ? "test-token" : undefined,
     hydrationMaxTurns: 50,
   };
-  const { server } = createRuntime(config, undefined, opts.deepSeekThinking ? { titleGenerator: () => Promise.resolve("") } : {});
+  const { server } = createRuntime(config, opts.executor, opts.deepSeekThinking ? { titleGenerator: () => Promise.resolve("") } : {});
   const port = await new Promise<number>((resolve, reject) => {
     server.bindAsync("127.0.0.1:0", grpc.ServerCredentials.createInsecure(), (err, p) =>
       err ? reject(err) : resolve(p),
@@ -372,6 +372,25 @@ test("failed turn is not written through", async (t) => {
 
   // Give a (buggy) append a chance to arrive before asserting none did.
   await new Promise((r) => setTimeout(r, 200));
+  assert.equal(appends.length, 0);
+});
+
+test("checkpoint failure prevents done and completed transcript write", async (t) => {
+  let checkpointCalls = 0;
+  let closeCalls = 0;
+  const executor: ToolExecutor = {
+    async execute() { return { ok: true, output: "changed" }; },
+    async checkpointSession() { checkpointCalls++; throw new Error("R2 unavailable"); },
+    async closeSession() { closeCalls++; },
+  };
+  const { chat, sessionId, appends } = await setup(t, (i) => i === 1 ? toolCallReply() : textReply("finished"),
+    { withSessionManager: true, executor });
+  const events = await chat({ session_id: sessionId, content: "change file", user_id: "alice" });
+  assert.equal(checkpointCalls, 1);
+  assert.equal(closeCalls, 1);
+  assert.ok(events.some((event) => event.error));
+  assert.equal(events.some((event) => event.done), false);
+  await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(appends.length, 0);
 });
 
