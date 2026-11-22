@@ -80,6 +80,7 @@ export class CubeToolExecutor implements ToolExecutor {
   private readonly client: CubeClient;
   private readonly token?: string;
   private readonly fatalErrors = new Map<string, string>();
+  private readonly dirtySessions = new Set<string>();
 
   constructor(address: string, token?: string) {
     this.token = token;
@@ -101,6 +102,18 @@ export class CubeToolExecutor implements ToolExecutor {
   async closeSession(sessionId: string): Promise<void> {
     if (!sessionId) return;
     await unary(this.client, "closeSessionSandbox", { session_id: sessionId }, this.token);
+    this.dirtySessions.delete(sessionId);
+  }
+
+  async checkpointSession(sessionId: string): Promise<void> {
+    if (!this.dirtySessions.has(sessionId)) return;
+    try {
+      await unary(this.client, "checkpointSessionSandbox", { session_id: sessionId }, this.token);
+      this.dirtySessions.delete(sessionId);
+    } catch (error) {
+      this.fatalErrors.set(sessionId, "sandbox checkpoint failed; workspace changes were discarded");
+      throw error;
+    }
   }
 
   async execute(tool: string, args: Record<string, unknown>, signal?: AbortSignal, sessionId?: string): Promise<ToolExecutionResult> {
@@ -111,6 +124,7 @@ export class CubeToolExecutor implements ToolExecutor {
       await unary(this.client, "ensureSessionSandbox", { session_id: sessionId }, this.token, signal);
       toolAttempted = true;
       const response = await unary(this.client, "executeTool", { session_id: sessionId, ...payload }, this.token, signal);
+      if (tool !== "read") this.dirtySessions.add(sessionId);
       const exitCode = Number(response.exit_code ?? 0);
       const stdout = String(response.stdout ?? "");
       const stderr = String(response.stderr ?? "");

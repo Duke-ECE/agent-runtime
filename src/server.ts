@@ -470,11 +470,26 @@ export function createRuntime(
 
       agent
         .prompt(content ?? "")
-        .then(() => {
+        .then(async () => {
           const sandboxFailure = executor.takeFatalError?.(session.id);
           if (sandboxFailure && !call.cancelled) {
             turnFailed = true;
             call.write({ error: { message: sandboxFailure, retryable: true } });
+          }
+          if (!turnFailed && !call.cancelled) {
+            try {
+              await executor.checkpointSession?.(session.id);
+            } catch (err) {
+              turnFailed = true;
+              executor.takeFatalError?.(session.id);
+              call.write({ error: { message: err instanceof Error ? err.message : String(err), retryable: true } });
+            }
+          }
+          if (turnFailed || call.cancelled) {
+            if (executor.closeSession) {
+              try { await executor.closeSession(session.id); }
+              catch (err) { console.warn(`Cube close failed for ${session.id}:`, err); }
+            }
           }
           // Skip the write-through on error/abort turns and on client disconnect.
           if (!turnFailed && !call.cancelled) {
@@ -568,6 +583,9 @@ export function createRuntime(
         })
         .catch((err: unknown) => {
           executor.takeFatalError?.(session.id);
+          if (executor.closeSession) {
+            void executor.closeSession(session.id).catch((closeError) => console.warn(`Cube close failed for ${session.id}:`, closeError));
+          }
           try {
             call.write({ error: { message: err instanceof Error ? err.message : String(err), retryable: false } });
           } finally {
