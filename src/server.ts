@@ -471,6 +471,11 @@ export function createRuntime(
       agent
         .prompt(content ?? "")
         .then(() => {
+          const sandboxFailure = executor.takeFatalError?.(session.id);
+          if (sandboxFailure && !call.cancelled) {
+            turnFailed = true;
+            call.write({ error: { message: sandboxFailure, retryable: true } });
+          }
           // Skip the write-through on error/abort turns and on client disconnect.
           if (!turnFailed && !call.cancelled) {
             call.write({ done: { input_tokens: inputTokens, output_tokens: outputTokens } });
@@ -562,6 +567,7 @@ export function createRuntime(
           call.end();
         })
         .catch((err: unknown) => {
+          executor.takeFatalError?.(session.id);
           try {
             call.write({ error: { message: err instanceof Error ? err.message : String(err), retryable: false } });
           } finally {
@@ -583,7 +589,7 @@ export function createRuntime(
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const executor = config.sandboxManagerAddr ? new CubeToolExecutor(config.sandboxManagerAddr) : new NullExecutor();
+  const executor = config.sandboxManagerAddr ? new CubeToolExecutor(config.sandboxManagerAddr, config.serviceToken) : new NullExecutor();
   const { server, sessions } = createRuntime(config, executor);
   sessions.start();
 

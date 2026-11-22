@@ -132,9 +132,12 @@ pi-coding-agent). Execution goes through a `ToolExecutor` interface. With
 `SANDBOX_MANAGER_ADDR` unset, `NullExecutor` reports that tools are unavailable.
 When set, `CubeToolExecutor` calls the manager's session-scoped `sandbox.v3`
 service: it ensures a sandbox for the current session, sends a typed tool call,
-and relays the result. Multi-replacement edits are applied against one original
-file snapshot in the manager. The runtime never receives Cube credentials or
-Cube sandbox IDs. The deployment manifest leaves this feature off by default.
+and relays the result. It sends `SERVICE_TOKEN` as internal gRPC metadata when
+configured. Multi-replacement edits are applied against one original file
+snapshot in the manager. If a tool RPC fails after execution starts, the turn
+is marked failed: no `done` event or completed transcript write is emitted,
+because workspace changes may not have been committed. The runtime never
+receives Cube credentials, R2 credentials, or Cube sandbox IDs.
 
 ## Environment variables
 
@@ -148,6 +151,7 @@ Cube sandbox IDs. The deployment manifest leaves this feature off by default.
 | `LLM_BASE_URL`        | `https://api.openai.com/v1`   | Fallback OpenAI-compatible base URL           |
 | `LLM_MODEL`           | `gpt-4o-mini`                 | Fallback model id                             |
 | `SANDBOX_MANAGER_ADDR` | _(none)_ | Internal gRPC address of sandbox-manager; unset keeps tools disabled |
+| `SERVICE_TOKEN` | _(none)_ | Shared internal token for session-manager and authenticated sandbox.v3 calls |
 
 The server boots fine with no `LLM_*` env set; `Chat` then returns an `error`
 event explaining the LLM is not configured.
