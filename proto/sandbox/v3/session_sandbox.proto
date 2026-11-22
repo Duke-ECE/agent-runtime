@@ -9,6 +9,7 @@ option go_package = "github.com/Duke-ECE/protos/gen/go/sandbox/v3;v3";
 service SessionSandboxService {
   rpc EnsureSessionSandbox(EnsureSessionSandboxRequest) returns (EnsureSessionSandboxResponse);
   rpc ExecuteTool(ExecuteToolRequest) returns (ExecuteToolResponse);
+  rpc CheckpointSessionSandbox(CheckpointSessionSandboxRequest) returns (CheckpointSessionSandboxResponse);
   rpc PutResource(stream PutResourceRequest) returns (PutResourceResponse);
   rpc GetResource(GetResourceRequest) returns (stream GetResourceResponse);
   rpc CloseSessionSandbox(CloseSessionSandboxRequest) returns (CloseSessionSandboxResponse);
@@ -68,6 +69,13 @@ message ExecuteToolResponse {
   string stderr = 3;
   bool truncated = 4;
 }
+
+// Called after a completed agent turn and before its durable done event.
+message CheckpointSessionSandboxRequest {
+  string session_id = 1;
+}
+
+message CheckpointSessionSandboxResponse {}
 
 // Each PutResource stream must start with session_id and path. Subsequent
 // chunks may omit them, but a changed non-empty value is invalid.

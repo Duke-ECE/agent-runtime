@@ -200,14 +200,15 @@ const roles = (append: AppendCall) => append.messages.map((m) => m.role);
 
 /** The session's resolved LLM triple as the runtime sees it. */
 function resolvedLlm(runtime: Runtime, sessionId: string): { apiKey?: string; baseUrl: string; model: string } {
-  return runtime.sessions.get(sessionId).agent.llm;
+  const { apiKey, baseUrl, model } = runtime.sessions.get(sessionId).agent.llm;
+  return { apiKey, baseUrl, model };
 }
 
 test("fresh session records its frozen LLM triple on the first AppendTurn, then not again", async (t) => {
   const { runtime, llmUrl, createSession, chat, appends } = await setup(t, { replies: ["reply one", "reply two"] });
   const { session_id } = await createSession({
     user_id: "alice",
-    llm: { api_key: "sk-custom", base_url: llmUrl, model: "custom-model" },
+    llm: { api_key: "sk-custom", base_url: llmUrl, model: "custom-model", thinking_mode: "provider_default" },
   });
 
   // The request llm wins over env for a fresh session.
@@ -218,7 +219,7 @@ test("fresh session records its frozen LLM triple on the first AppendTurn, then 
   // No system prompt: the config turn leads the turn's messages.
   assert.deepEqual(roles(appends[0]), ["config", "user", "assistant"]);
   assert.deepEqual(JSON.parse(appends[0].messages[0].content_json), {
-    llm: { api_key: "sk-custom", base_url: llmUrl, model: "custom-model" },
+    llm: { api_key: "sk-custom", base_url: llmUrl, model: "custom-model", thinking_mode: "provider_default" },
   });
 
   await chat({ session_id, content: "again", user_id: "alice" });
@@ -252,8 +253,27 @@ test("resume: transcript config beats the request llm (frozen triple wins)", asy
 
   await chat({ session_id, content: "again", user_id: "alice" });
   await waitFor(() => appends.length === 1);
-  // Marker seeded from the transcript: unchanged triple is not re-recorded.
-  assert.deepEqual(roles(appends[0]), ["user", "assistant"]);
+  // A legacy marker has no thinking_mode, so the resolved compatibility
+  // default is recorded once on the next completed turn.
+  assert.deepEqual(roles(appends[0]), ["config", "user", "assistant"]);
+});
+
+test("resume keeps the transcript's frozen thinking mode", async (t) => {
+  const { runtime, createSession } = await setup(t, {
+    replies: ["unused"],
+    transcript: (url) => [
+      transcriptMessage(1, "config", { llm: {
+        api_key: "sk-frozen", base_url: url, model: "frozen-model", thinking_mode: "provider_default",
+      } }),
+      transcriptMessage(2, "user", { content: "hi" }),
+    ],
+  });
+  const { session_id } = await createSession({
+    user_id: "alice",
+    session_id: "sess-thinking-frozen",
+    llm: { api_key: "sk-changed", base_url: "https://api.deepseek.com", model: "deepseek-flash", thinking_mode: "low" },
+  });
+  assert.equal(runtime.sessions.get(session_id).agent.llm.thinkingMode, "provider_default");
 });
 
 test("resume: request llm is used when the transcript has no config turn", async (t) => {
@@ -264,7 +284,7 @@ test("resume: request llm is used when the transcript has no config turn", async
   const { session_id } = await createSession({
     user_id: "alice",
     session_id: "sess-pre-config",
-    llm: { api_key: "sk-request", base_url: llmUrl, model: "request-model" },
+    llm: { api_key: "sk-request", base_url: llmUrl, model: "request-model", thinking_mode: "provider_default" },
   });
 
   assert.deepEqual(resolvedLlm(runtime, session_id), {
@@ -278,7 +298,7 @@ test("resume: request llm is used when the transcript has no config turn", async
   // Pre-config-turn transcript: the resolved triple is recorded once.
   assert.deepEqual(roles(appends[0]), ["config", "user", "assistant"]);
   assert.deepEqual(JSON.parse(appends[0].messages[0].content_json), {
-    llm: { api_key: "sk-request", base_url: llmUrl, model: "request-model" },
+    llm: { api_key: "sk-request", base_url: llmUrl, model: "request-model", thinking_mode: "provider_default" },
   });
 });
 
@@ -308,7 +328,7 @@ test("resume: a config turn with an empty api_key does not override a keyed requ
   // The recorded triple (all-empty) differs from the resolved one: re-recorded.
   assert.deepEqual(roles(appends[0]), ["config", "user", "assistant"]);
   assert.deepEqual(JSON.parse(appends[0].messages[0].content_json), {
-    llm: { api_key: "sk-request", base_url: llmUrl, model: "request-model" },
+    llm: { api_key: "sk-request", base_url: llmUrl, model: "request-model", thinking_mode: "provider_default" },
   });
 });
 
@@ -347,5 +367,5 @@ test("template LLM changed after the session started: resume keeps the ORIGINAL 
 
   await chat({ session_id, content: "again", user_id: "alice" });
   await waitFor(() => appends.length === 1);
-  assert.deepEqual(roles(appends[0]), ["user", "assistant"]);
+  assert.deepEqual(roles(appends[0]), ["config", "user", "assistant"]);
 });

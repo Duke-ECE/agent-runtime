@@ -63,11 +63,17 @@ model) wins; anything absent falls back to `LLM_API_KEY` / `LLM_BASE_URL` /
 `LLM_MODEL` env vars. Once a session has started, though, its LLM triple is
 **frozen**: see the config-turn paragraph below.
 
-For `deepseek-flash` on the official `api.deepseek.com` endpoint, the runtime
-adds `thinking: {"type":"disabled"}` to each OpenAI-compatible request.
-DeepSeek otherwise defaults to high-effort thinking, while this runtime only
-streams final answer text. Other models and endpoints keep their existing
-request behavior. The public API and CLI do not expose a thinking setting.
+The session's `thinking_mode` is `off`, `low`, `high`, `max`, or
+`provider_default`. For `deepseek-flash` on official `api.deepseek.com`, an
+absent mode keeps the compatibility default of `off`. Explicit `off` sends
+`thinking: {"type":"disabled"}`; `low`/`high`/`max` send enabled thinking
+and matching `reasoning_effort`; `provider_default` leaves both parameters
+absent. Other endpoints accept only `provider_default` or an absent mode.
+The chat stream contains final answer text, not reasoning content.
+`ChatRequest.thinking_mode = "off"` temporarily disables thinking for one
+message, including its tool follow-up calls. An empty value uses the frozen
+session mode; the next message therefore returns to that mode automatically.
+Other per-turn values are rejected.
 
 `CreateSession` also accepts an optional `system_prompt` (empty = no system
 prompt — the runtime carries no built-in default; the platform's "Default
@@ -87,8 +93,8 @@ was deleted keeps its persona from the transcript. Hydration seeds the
 unchanged prompt is not re-recorded; system turns never become pi conversation
 messages (the last one wins, malformed ones are skipped with a warning).
 
-The session's resolved LLM triple is likewise persisted, as `role: "config"`
-messages (content_json `{"llm": {"api_key": ..., "base_url": ..., "model": ...}}`,
+The session's resolved LLM configuration is likewise persisted, as `role: "config"`
+messages (content_json `{"llm": {"api_key": ..., "base_url": ..., "model": ..., "thinking_mode": ...}}`,
 recorded faithfully as-is — `api_key` may be `""` when no key was resolved):
 the first `AppendTurn` that finds no matching config turn recorded prepends
 one, after the system message (if any) and before the user message. Resume
@@ -112,6 +118,13 @@ historical usage. User, system, config, and tool messages keep their plain
 shapes.
 Hydration ignores the extra key (hydrated assistant messages get zero usage).
 
+For thinking-enabled official DeepSeek Flash sessions, each completed turn also
+records private `agent_state` rows with the exact provider assistant/tool
+messages. These keep `reasoning_content` and tool-call order intact across a
+runtime restart. Session-manager redacts their payloads on owner transcript
+reads; only the service-token hydration path receives them. A truncated
+thinking history is fetched in bounded pages before the agent resumes.
+
 ## Tools
 
 The agent exposes `read` / `write` / `bash` / `edit` tools (schemas modeled on
@@ -119,9 +132,16 @@ pi-coding-agent). Execution goes through a `ToolExecutor` interface. With
 `SANDBOX_MANAGER_ADDR` unset, `NullExecutor` reports that tools are unavailable.
 When set, `CubeToolExecutor` calls the manager's session-scoped `sandbox.v3`
 service: it ensures a sandbox for the current session, sends a typed tool call,
-and relays the result. Multi-replacement edits are applied against one original
-file snapshot in the manager. The runtime never receives Cube credentials or
-Cube sandbox IDs. The deployment manifest leaves this feature off by default.
+and relays the result. It sends `SERVICE_TOKEN` as internal gRPC metadata when
+configured. Multi-replacement edits are applied against one original file
+snapshot in the manager. If a tool RPC fails after execution starts, the turn
+is marked failed: no `done` event or completed transcript write is emitted,
+because workspace changes may not have been committed. The runtime never
+receives Cube credentials, R2 credentials, or Cube sandbox IDs.
+After a turn that changes files, the runtime asks the manager to checkpoint
+the sandbox before `done`. A failed or canceled turn closes the sandbox so the
+next turn restores the last committed workspace revision. Transcript
+`AppendTurn` is still fire-and-log; it is not atomic with the checkpoint.
 
 ## Environment variables
 
@@ -135,6 +155,7 @@ Cube sandbox IDs. The deployment manifest leaves this feature off by default.
 | `LLM_BASE_URL`        | `https://api.openai.com/v1`   | Fallback OpenAI-compatible base URL           |
 | `LLM_MODEL`           | `gpt-4o-mini`                 | Fallback model id                             |
 | `SANDBOX_MANAGER_ADDR` | _(none)_ | Internal gRPC address of sandbox-manager; unset keeps tools disabled |
+| `SERVICE_TOKEN` | _(none)_ | Shared internal token for session-manager and authenticated sandbox.v3 calls |
 
 The server boots fine with no `LLM_*` env set; `Chat` then returns an `error`
 event explaining the LLM is not configured.

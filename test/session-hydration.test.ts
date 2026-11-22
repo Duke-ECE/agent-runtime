@@ -426,6 +426,7 @@ test("markers beyond the window are recovered via a full-transcript fetch", asyn
     apiKey: "frozen-key",
     baseUrl: "https://frozen.example/v1",
     model: "frozen-model",
+    thinkingMode: "provider_default",
   });
   const state = sess.agent.state;
   assert.equal(state.systemPrompt, "head persona");

@@ -15,6 +15,8 @@ export interface ToolExecutionResult {
 export interface ToolExecutor {
   execute(tool: string, args: Record<string, unknown>, signal?: AbortSignal, sessionId?: string): Promise<ToolExecutionResult>;
   closeSession?(sessionId: string): Promise<void>;
+  checkpointSession?(sessionId: string): Promise<void>;
+  takeFatalError?(sessionId: string): string | undefined;
 }
 
 export const SANDBOX_NOT_CONNECTED = "tool execution unavailable: sandbox not connected";

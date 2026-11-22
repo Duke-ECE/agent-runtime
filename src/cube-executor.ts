@@ -5,7 +5,7 @@ import * as protoLoader from "@grpc/proto-loader";
 import type { ToolExecutionResult, ToolExecutor } from "./tools.js";
 
 type UnaryCallback = (error: grpc.ServiceError | null, response: Record<string, unknown>) => void;
-type UnaryMethod = (request: Record<string, unknown>, callback: UnaryCallback) => grpc.ClientUnaryCall;
+type UnaryMethod = (request: Record<string, unknown>, metadata: grpc.Metadata, callback: UnaryCallback) => grpc.ClientUnaryCall;
 type CubeClient = grpc.Client & Record<string, UnaryMethod>;
 
 function protoPath(): string {
@@ -26,12 +26,14 @@ function positiveInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
-function unary(client: CubeClient, method: string, request: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+function unary(client: CubeClient, method: string, request: Record<string, unknown>, token?: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
   if (signal?.aborted) return Promise.reject(new Error("tool canceled"));
   return new Promise((resolve, reject) => {
     let call: grpc.ClientUnaryCall;
     const onAbort = () => call.cancel();
-    call = client[method](request, (error, response) => {
+    const metadata = new grpc.Metadata();
+    if (token) metadata.set("x-service-token", token);
+    call = client[method](request, metadata, (error, response) => {
       signal?.removeEventListener("abort", onAbort);
       if (error) reject(error);
       else resolve(response);
@@ -76,8 +78,12 @@ function toolPayload(tool: string, args: Record<string, unknown>): Record<string
 
 export class CubeToolExecutor implements ToolExecutor {
   private readonly client: CubeClient;
+  private readonly token?: string;
+  private readonly fatalErrors = new Map<string, string>();
+  private readonly dirtySessions = new Set<string>();
 
-  constructor(address: string) {
+  constructor(address: string, token?: string) {
+    this.token = token;
     const definition = protoLoader.loadSync(protoPath(), { keepCase: true, longs: String, defaults: true, oneofs: true });
     const packageObject = grpc.loadPackageDefinition(definition) as unknown as {
       sandbox: { v3: { SessionSandboxService: grpc.ServiceClientConstructor } };
@@ -87,17 +93,38 @@ export class CubeToolExecutor implements ToolExecutor {
 
   close(): void { this.client.close(); }
 
+  takeFatalError(sessionId: string): string | undefined {
+    const error = this.fatalErrors.get(sessionId);
+    this.fatalErrors.delete(sessionId);
+    return error;
+  }
+
   async closeSession(sessionId: string): Promise<void> {
     if (!sessionId) return;
-    await unary(this.client, "closeSessionSandbox", { session_id: sessionId });
+    await unary(this.client, "closeSessionSandbox", { session_id: sessionId }, this.token);
+    this.dirtySessions.delete(sessionId);
+  }
+
+  async checkpointSession(sessionId: string): Promise<void> {
+    if (!this.dirtySessions.has(sessionId)) return;
+    try {
+      await unary(this.client, "checkpointSessionSandbox", { session_id: sessionId }, this.token);
+      this.dirtySessions.delete(sessionId);
+    } catch (error) {
+      this.fatalErrors.set(sessionId, "sandbox checkpoint failed; workspace changes were discarded");
+      throw error;
+    }
   }
 
   async execute(tool: string, args: Record<string, unknown>, signal?: AbortSignal, sessionId?: string): Promise<ToolExecutionResult> {
     if (!sessionId) return { ok: false, error: "session id is required for sandbox tools" };
+    let toolAttempted = false;
     try {
       const payload = toolPayload(tool, args);
-      await unary(this.client, "ensureSessionSandbox", { session_id: sessionId }, signal);
-      const response = await unary(this.client, "executeTool", { session_id: sessionId, ...payload }, signal);
+      await unary(this.client, "ensureSessionSandbox", { session_id: sessionId }, this.token, signal);
+      toolAttempted = true;
+      const response = await unary(this.client, "executeTool", { session_id: sessionId, ...payload }, this.token, signal);
+      if (tool !== "read") this.dirtySessions.add(sessionId);
       const exitCode = Number(response.exit_code ?? 0);
       const stdout = String(response.stdout ?? "");
       const stderr = String(response.stderr ?? "");
@@ -107,6 +134,7 @@ export class CubeToolExecutor implements ToolExecutor {
       if (tool === "edit") return { ok: true, output: `Edited ${stringArg(args, "path")}` };
       return { ok: true, output: output + (response.truncated ? "\n[output truncated]" : "") };
     } catch (error) {
+      if (toolAttempted) this.fatalErrors.set(sessionId, "sandbox tool failed; workspace changes may not have been saved");
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   }
